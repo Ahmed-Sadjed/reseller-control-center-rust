@@ -1,0 +1,63 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: reseller_db
+      POSTGRES_USER: reseller_user
+      POSTGRES_PASSWORD: dev_password_123
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reseller_user -d reseller_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    build: .
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    environment:
+      DATABASE_URL: postgres://reseller_user:dev_password_123@db:5432/reseller_db
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-super_secret_change_me_32chars!}
+      JWT_ACCESS_TTL_MINUTES: 60
+      JWT_REFRESH_TTL_DAYS: 7
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:-staging_aes_256_key_32bytes12345}
+      # SAFETY SWITCH — ALWAYS keep true. Never commit code that removes it.
+      # The provider factory refuses to build real adapters while this is set.
+      USE_MOCK_PROVIDER: "true"
+      # Django-parity throttles; override per environment (load tests relax
+      # these via shell env vars, production keeps the strict defaults).
+      RATE_LIMIT_ANON: ${RATE_LIMIT_ANON:-30}
+      RATE_LIMIT_USER: ${RATE_LIMIT_USER:-100}
+      RATE_LIMIT_PURCHASE: ${RATE_LIMIT_PURCHASE:-5}
+      WORKERS: 16
+      RUST_LOG: info
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  nginx:
+    build: ./nginx
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  pgdata:

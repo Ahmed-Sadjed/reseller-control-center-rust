@@ -1,0 +1,24 @@
+pub mod cms_only;
+pub mod error;
+pub mod factory;
+pub mod gold_panel;
+pub mod golden_api;
+pub mod hotplayer;
+pub mod mock;
+pub mod promax;
+pub mod redfoxx;
+pub mod tivipanel;
+pub mod types;
+pub mod whatsapp;
+
+pub use cms_only::CmsOnlyAdapter;
+pub use error::ProviderError;
+pub use factory::get_provider;
+pub use gold_panel::GoldPanelAdapter;
+pub use golden_api::GoldenApiAdapter;
+pub use mock::MockAdapter;
+pub use promax::PromaxAdapter;
+pub use redfoxx::RedfoxxAdapter;
+pub use tivipanel::TiviPanelAdapter;
+pub use types::*;
+pub use whatsapp::WhatsAppAdapter;

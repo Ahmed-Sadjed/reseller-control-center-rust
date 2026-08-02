@@ -1,0 +1,13 @@
+target/
+.git/
+.env
+k6/
+examples/
+server.log
+run.log
+build_err.txt
+nginx/html/
+nginx/Dockerfile
+nginx/default.conf
+docker-compose.yml
+*.md

@@ -1,0 +1,6 @@
+/target
+.env
+*.log
+build_err.txt
+build_out.txt
+k6/
