@@ -15,6 +15,7 @@ pub struct Settings {
     pub rate_limit_user: u64,
     pub rate_limit_purchase: u64,
     pub rust_log: String,
+    pub redis_stream_key: String,
 }
 
 impl Settings {
@@ -59,6 +60,8 @@ impl Settings {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+            redis_stream_key: env::var("REDIS_STREAM_KEY")
+                .unwrap_or_else(|_| "orders:fulfill".to_string()),
         }
     }
 }

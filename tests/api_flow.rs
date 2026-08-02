@@ -11,7 +11,6 @@ use uuid::Uuid;
 
 const TEST_DB_NAME: &str = "reseller_rust_test";
 const TEST_REDIS_DB: u8 = 15;
-
 /// Settings with hard guards: tests must NEVER talk to a real provider or a
 /// real (non-test) Redis namespace. Fails fast if the safety switch is off.
 fn test_settings() -> Settings {
@@ -555,7 +554,11 @@ async fn unauthenticated_requests_rejected() {
 /// Redis Stream worker with one credential per unit.
 #[actix_rt::test]
 async fn async_purchase_enqueued_via_redis_stream() {
-    let settings = test_settings();
+    let mut settings = test_settings();
+    // Isolate this test's worker from `full_purchase_flow_through_redis_stream`
+    // (same Redis DB 15): a distinct stream key means a worker killed by the
+    // other test's runtime can never orphan this test's order.
+    settings.redis_stream_key = "orders:fulfill:worker2".to_string();
     let pool = ensure_test_db().await;
     let redis_client = redis::Client::open(test_redis_url(&settings)).unwrap();
     let redis_conn = redis_client

@@ -9,16 +9,20 @@ pub const STREAM_KEY: &str = "orders:fulfill";
 pub const GROUP_NAME: &str = "workers";
 
 /// Push an order uuid onto the fulfillment stream (replaces tokio::spawn).
-pub async fn enqueue_order(conn: &redis::aio::MultiplexedConnection, order_id: Uuid) -> redis::RedisResult<String> {
+pub async fn enqueue_order(
+    conn: &redis::aio::MultiplexedConnection,
+    stream_key: &str,
+    order_id: Uuid,
+) -> redis::RedisResult<String> {
     let mut conn = conn.clone();
-    conn.xadd::<_, _, _, _, String>(STREAM_KEY, "*", &[("order_id", order_id.to_string())])
+    conn.xadd::<_, _, _, _, String>(stream_key, "*", &[("order_id", order_id.to_string())])
         .await
 }
 
-async fn ensure_group(conn: &mut redis::aio::MultiplexedConnection) {
+async fn ensure_group(conn: &mut redis::aio::MultiplexedConnection, stream_key: &str) {
     // MKSTREAM creates the stream if missing; BUSYGROUP errors are ignored.
     let _: redis::RedisResult<()> = conn
-        .xgroup_create_mkstream::<_, _, _, ()>(STREAM_KEY, GROUP_NAME, "$")
+        .xgroup_create_mkstream::<_, _, _, ()>(stream_key, GROUP_NAME, "$")
         .await;
 }
 
@@ -29,14 +33,15 @@ async fn worker_once(
     client: &redis::Client,
 ) -> Result<bool, anyhow::Error> {
     let mut conn = client.get_multiplexed_async_connection().await?;
-    ensure_group(&mut conn).await;
+    ensure_group(&mut conn, &settings.redis_stream_key).await;
 
     let consumer = format!("worker-{}", std::process::id());
     let opts = redis::streams::StreamReadOptions::default()
         .group(GROUP_NAME, &consumer)
         .count(1)
         .block(1000);
-    let reply: redis::streams::StreamReadReply = conn.xread_options(&[STREAM_KEY], &[">"], &opts).await?;
+    let reply: redis::streams::StreamReadReply =
+        conn.xread_options(&[&settings.redis_stream_key], &[">"], &opts).await?;
 
     let mut done = false;
     for stream in &reply.keys {
@@ -55,7 +60,7 @@ async fn worker_once(
 
             // Ack regardless: failures are persisted on the order itself.
             let _: redis::RedisResult<usize> =
-                conn.xack(STREAM_KEY, GROUP_NAME, &[&entry.id]).await;
+                conn.xack(&settings.redis_stream_key, GROUP_NAME, &[&entry.id]).await;
         }
     }
 

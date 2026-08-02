@@ -201,7 +201,7 @@ pub async fn create_order(
     }
 
     // Enqueue background fulfillment on the Redis Stream (worker in main.rs).
-    if let Err(e) = crate::queue::enqueue_order(redis_conn.get_ref(), order_id).await {
+    if let Err(e) = crate::queue::enqueue_order(redis_conn.get_ref(), &settings.redis_stream_key, order_id).await {
         tracing::error!(order_id = %order_id, error = %e, "failed to enqueue order on stream");
     }
 
