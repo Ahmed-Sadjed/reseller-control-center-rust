@@ -1,10 +1,15 @@
-use actix_web::{web, HttpResponse};
+use actix_web::http::header::CONTENT_TYPE;
+use actix_web::{web, FromRequest, HttpRequest, HttpResponse};
+use futures_util::StreamExt;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool, Row};
+use std::collections::HashMap;
+use std::path::Path;
 use uuid::Uuid;
 
 use crate::{
+    config::Settings,
     error::ApiError,
     middleware::AuthUser,
     models::User,
@@ -51,7 +56,8 @@ const RESELLER_LIST_SELECT: &str = "SELECT u.id, u.username, u.email, u.role, u.
      u.is_active, u.uuid, u.date_joined, u.last_login, \
      (SELECT count(*) FROM orders o WHERE o.reseller_id = u.id AND o.status = 'COMPLETED') AS order_count, \
      (SELECT COALESCE(sum(o.total_credits), 0) FROM orders o \
-      WHERE o.reseller_id = u.id AND o.status = 'COMPLETED') AS total_revenue";
+      WHERE o.reseller_id = u.id AND o.status = 'COMPLETED') AS total_revenue \
+     FROM users u";
 
 #[derive(Debug, Deserialize)]
 pub struct ResellerQuery {
@@ -670,6 +676,7 @@ pub async fn admin_products_list(
     .await?;
 
     for r in &mut rows {
+        r.image_url = media_url(r.image_url.take());
         if !r.is_manual {
             r.total_credentials = 0;
             r.available_credentials = 0;
@@ -702,15 +709,24 @@ pub struct AdminProductCreateRequest {
     pub is_active: Option<bool>,
 }
 
-/// POST /api/dashboard/products/create/ — Django field names (category/provider,
+/// POST /api/dashboard/products/create/ â€” Django field names (category/provider,
 /// not category_id/provider_id). is_manual requires credential_type; non-manual
-/// requires provider.
+/// requires provider. Accepts both JSON and multipart/form-data (the admin
+/// frontend submits a FormData with an optional image upload).
 pub async fn admin_products_create(
     pool: web::Data<PgPool>,
+    settings: web::Data<Settings>,
     user: AuthUser,
-    body: web::Json<AdminProductCreateRequest>,
+    req: HttpRequest,
+    payload: web::Payload,
 ) -> Result<HttpResponse, ApiError> {
     require_admin(&user.0)?;
+    let parsed = parse_product_payload(&req, payload, &settings.media_dir).await?;
+    let body = parsed.request;
+
+    if body.name.trim().is_empty() {
+        return Err(ApiError::BadRequest("name is required.".into()));
+    }
     let is_manual = body.is_manual.unwrap_or(false);
     if is_manual && body.credential_type.as_deref().unwrap_or("").is_empty() {
         return Err(ApiError::BadRequest(
@@ -723,6 +739,7 @@ pub async fn admin_products_create(
         ));
     }
 
+    let image = parsed.image_path.or_else(|| image_path_from_payload(&body));
     let product: crate::models::Product = sqlx::query_as(
         "INSERT INTO products (name, category_id, provider_id, description, image, is_manual, \
          credential_type, price_in_credits, duration_months, external_pack_id, is_active) \
@@ -734,7 +751,7 @@ pub async fn admin_products_create(
     .bind(body.category)
     .bind(body.provider)
     .bind(body.description.clone().unwrap_or_default())
-    .bind(&body.image)
+    .bind(&image)
     .bind(is_manual)
     .bind(&body.credential_type)
     .bind(body.price_in_credits)
@@ -750,12 +767,20 @@ pub async fn admin_products_create(
 
 pub async fn admin_products_update(
     pool: web::Data<PgPool>,
+    settings: web::Data<Settings>,
     path: web::Path<Uuid>,
     user: AuthUser,
-    body: web::Json<AdminProductCreateRequest>,
+    req: HttpRequest,
+    payload: web::Payload,
 ) -> Result<HttpResponse, ApiError> {
     require_admin(&user.0)?;
     let product_id = path.into_inner();
+    let parsed = parse_product_payload(&req, payload, &settings.media_dir).await?;
+    let body = parsed.request;
+
+    if body.name.trim().is_empty() {
+        return Err(ApiError::BadRequest("name is required.".into()));
+    }
 
     let mut qb: sqlx::QueryBuilder<sqlx::Postgres> =
         sqlx::QueryBuilder::new("UPDATE products SET updated_at = now()");
@@ -769,7 +794,7 @@ pub async fn admin_products_update(
     if let Some(description) = &body.description {
         qb.push(", description = ").push_bind(description);
     }
-    if let Some(image) = &body.image {
+    if let Some(image) = parsed.image_path.or_else(|| image_path_from_payload(&body)) {
         qb.push(", image = ").push_bind(image);
     }
     if let Some(is_manual) = body.is_manual {
@@ -795,6 +820,217 @@ pub async fn admin_products_update(
 
     let item = load_admin_product(pool.get_ref(), product_id).await?;
     Ok(HttpResponse::Ok().json(item))
+}
+
+// ---------------------------------------------------------------------------
+// Product payload parsing: the admin frontend submits products as
+// multipart/form-data (FormData + optional image file); API clients send
+// application/json. Both are accepted. Uploaded images are persisted under
+// <media_dir>/products/ and the products.image column stores the relative
+// path ("products/<file>"), exposed to the API as "/media/products/<file>".
+// ---------------------------------------------------------------------------
+
+const PRODUCT_IMAGE_LIMIT: usize = 10 * 1024 * 1024;
+const PRODUCT_FIELD_LIMIT: usize = 1024 * 1024;
+
+struct ProductPayload {
+    request: AdminProductCreateRequest,
+    image_path: Option<String>,
+}
+
+fn image_path_from_payload(body: &AdminProductCreateRequest) -> Option<String> {
+    body.image.as_ref().filter(|s| !s.trim().is_empty()).cloned()
+}
+
+fn parse_opt_uuid(fields: &HashMap<String, String>, name: &str) -> Result<Option<Uuid>, ApiError> {
+    match fields.get(name) {
+        None => Ok(None),
+        Some(s) if s.trim().is_empty() => Ok(None),
+        Some(s) => s
+            .trim()
+            .parse::<Uuid>()
+            .map(Some)
+            .map_err(|_| ApiError::BadRequest(format!("Invalid value for '{name}'."))),
+    }
+}
+
+fn parse_opt_bool(fields: &HashMap<String, String>, name: &str) -> Result<Option<bool>, ApiError> {
+    match fields.get(name) {
+        None => Ok(None),
+        Some(s) if s.trim().is_empty() => Ok(None),
+        Some(s) => s
+            .trim()
+            .parse::<bool>()
+            .map(Some)
+            .map_err(|_| ApiError::BadRequest(format!("Invalid value for '{name}'."))),
+    }
+}
+
+fn parse_opt_i32(fields: &HashMap<String, String>, name: &str) -> Result<Option<i32>, ApiError> {
+    match fields.get(name) {
+        None => Ok(None),
+        Some(s) if s.trim().is_empty() => Ok(None),
+        Some(s) => s
+            .trim()
+            .parse::<i32>()
+            .map(Some)
+            .map_err(|_| ApiError::BadRequest(format!("Invalid value for '{name}'."))),
+    }
+}
+
+fn parse_opt_decimal(
+    fields: &HashMap<String, String>,
+    name: &str,
+) -> Result<Option<Decimal>, ApiError> {
+    match fields.get(name) {
+        None => Ok(None),
+        Some(s) if s.trim().is_empty() => Ok(None),
+        Some(s) => s
+            .trim()
+            .parse::<Decimal>()
+            .map(Some)
+            .map_err(|_| ApiError::BadRequest(format!("Invalid value for '{name}'."))),
+    }
+}
+
+fn image_extension(mime_subtype: Option<&str>) -> &'static str {
+    match mime_subtype {
+        Some("png") => "png",
+        Some("jpeg") | Some("jpg") => "jpg",
+        Some("webp") => "webp",
+        Some("gif") => "gif",
+        _ => "img",
+    }
+}
+
+fn save_uploaded_image(
+    media_dir: &str,
+    subdir: &str,
+    extension: &str,
+    data: &[u8],
+) -> Result<String, ApiError> {
+    let dir = Path::new(media_dir).join(subdir);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| ApiError::Internal(format!("create media directory: {e}")))?;
+    let filename = format!("{}.{}", Uuid::new_v4().simple(), extension);
+    std::fs::write(dir.join(&filename), data)
+        .map_err(|e| ApiError::Internal(format!("write uploaded file: {e}")))?;
+    Ok(format!("{subdir}/{filename}"))
+}
+
+async fn read_body_bytes(mut payload: web::Payload) -> Result<web::BytesMut, ApiError> {
+    let mut bytes = actix_web::web::BytesMut::new();
+    while let Some(chunk) = payload.next().await {
+        let chunk = chunk.map_err(|e| ApiError::Internal(format!("read request body: {e}")))?;
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn is_multipart(req: &HttpRequest) -> bool {
+    req.headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .starts_with("multipart/form-data")
+}
+
+/// Reads a whole multipart field into memory, enforcing a byte limit.
+async fn read_field(
+    field: &mut actix_multipart::Field,
+    limit: usize,
+) -> Result<Vec<u8>, ApiError> {
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = field.next().await {
+        let chunk =
+            chunk.map_err(|e| ApiError::BadRequest(format!("failed reading field: {e}")))?;
+        buf.extend_from_slice(&chunk);
+        if buf.len() > limit {
+            return Err(ApiError::BadRequest(format!(
+                "Field exceeds the {} MiB limit.",
+                limit / (1024 * 1024)
+            )));
+        }
+    }
+    Ok(buf)
+}
+
+/// Parses a multipart/form-data payload into (text fields, saved image path).
+/// The "image" file field is persisted under <media_dir>/<subdir>/ and the
+/// returned path is the relative "subdir/<file>" stored in the DB.
+async fn parse_multipart_form(
+    req: &HttpRequest,
+    payload: &mut actix_web::dev::Payload,
+    media_dir: &str,
+    subdir: &str,
+) -> Result<(HashMap<String, String>, Option<String>), ApiError> {
+    let mut multipart = actix_multipart::Multipart::from_request(req, payload)
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("invalid multipart payload: {e}")))?;
+
+    let mut fields: HashMap<String, String> = HashMap::new();
+    let mut image: Option<(String, Vec<u8>)> = None;
+
+    while let Some(item) = multipart.next().await {
+        let mut field = item
+            .map_err(|e| ApiError::BadRequest(format!("invalid multipart field: {e}")))?;
+        let name = field.name().unwrap_or("").to_string();
+        if name == "image" {
+            let data = read_field(&mut field, PRODUCT_IMAGE_LIMIT).await?;
+            let subtype = field.content_type().map(|m| m.subtype().as_str());
+            image = Some((image_extension(subtype).to_string(), data));
+        } else {
+            let data = read_field(&mut field, PRODUCT_FIELD_LIMIT).await?;
+            fields.insert(name, String::from_utf8_lossy(&data).into_owned());
+        }
+    }
+
+    let image_path = match image {
+        Some((extension, data)) => Some(save_uploaded_image(media_dir, subdir, &extension, &data)?),
+        None => None,
+    };
+    Ok((fields, image_path))
+}
+
+async fn parse_product_payload(
+    req: &HttpRequest,
+    payload: web::Payload,
+    media_dir: &str,
+) -> Result<ProductPayload, ApiError> {
+    if is_multipart(req) {
+        let (mut fields, image_path) =
+            parse_multipart_form(req, &mut payload.into_inner(), media_dir, "products").await?;
+        let request = AdminProductCreateRequest {
+            name: fields.remove("name").unwrap_or_default(),
+            category: parse_opt_uuid(&fields, "category")?,
+            provider: parse_opt_uuid(&fields, "provider")?,
+            description: fields
+                .remove("description")
+                .filter(|s| !s.trim().is_empty()),
+            image: None,
+            is_manual: parse_opt_bool(&fields, "is_manual")?,
+            credential_type: fields
+                .remove("credential_type")
+                .filter(|s| !s.trim().is_empty()),
+            price_in_credits: parse_opt_decimal(&fields, "price_in_credits")?,
+            duration_months: parse_opt_i32(&fields, "duration_months")?,
+            external_pack_id: parse_opt_i32(&fields, "external_pack_id")?,
+            is_active: parse_opt_bool(&fields, "is_active")?,
+        };
+        Ok(ProductPayload {
+            request,
+            image_path,
+        })
+    } else {
+        let bytes = read_body_bytes(payload).await?;
+        let request: AdminProductCreateRequest = serde_json::from_slice(&bytes)
+            .map_err(|e| ApiError::BadRequest(format!("Invalid JSON body: {e}")))?;
+        Ok(ProductPayload {
+            request,
+            image_path: None,
+        })
+    }
 }
 
 /// Django parity: products with existing orders are soft-deactivated (FK
@@ -840,13 +1076,23 @@ pub async fn admin_products_delete(
 }
 
 async fn load_admin_product(pool: &PgPool, product_id: Uuid) -> Result<AdminProductItem, ApiError> {
-    sqlx::query_as::<_, AdminProductItem>(&format!(
+    let mut item: AdminProductItem = sqlx::query_as::<_, AdminProductItem>(&format!(
         "{ADMIN_PRODUCT_SELECT} WHERE p.id = $1"
     ))
     .bind(product_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| ApiError::NotFound("product not found".into()))
+    .ok_or_else(|| ApiError::NotFound("product not found".into()))?;
+    item.image_url = media_url(item.image_url.take());
+    Ok(item)
+}
+
+/// Exposes stored image paths ("products/<file>") as absolute /media/ URLs,
+/// matching Django's MEDIA_URL semantics.
+fn media_url(image: Option<String>) -> Option<String> {
+    image
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("/media/{}", s.trim()))
 }
 
 // --- variants ---------------------------------------------------------------
@@ -1018,13 +1264,16 @@ pub async fn admin_categories_list(
     user: AuthUser,
 ) -> Result<HttpResponse, ApiError> {
     require_admin(&user.0)?;
-    let rows: Vec<AdminCategoryItem> = sqlx::query_as(
+    let mut rows: Vec<AdminCategoryItem> = sqlx::query_as(
         "SELECT c.id, c.name, c.slug, c.description, c.image, c.is_active, c.sort_order, \
          (SELECT count(*) FROM products p WHERE p.category_id = c.id)::bigint AS product_count \
          FROM categories c ORDER BY c.sort_order, c.name",
     )
     .fetch_all(pool.get_ref())
     .await?;
+    for r in &mut rows {
+        r.image = media_url(r.image.take());
+    }
     Ok(HttpResponse::Ok().json(rows))
 }
 
@@ -1053,54 +1302,104 @@ pub fn slugify(name: &str) -> String {
     slug.trim_matches('-').to_string()
 }
 
+struct CategoryPayload {
+    request: AdminCategoryRequest,
+    image_path: Option<String>,
+}
+
+async fn parse_category_payload(
+    req: &HttpRequest,
+    payload: web::Payload,
+    media_dir: &str,
+) -> Result<CategoryPayload, ApiError> {
+    if is_multipart(req) {
+        let (mut fields, image_path) =
+            parse_multipart_form(req, &mut payload.into_inner(), media_dir, "categories").await?;
+        let request = AdminCategoryRequest {
+            name: fields.remove("name").unwrap_or_default(),
+            slug: fields.remove("slug").filter(|s| !s.trim().is_empty()),
+            description: fields
+                .remove("description")
+                .filter(|s| !s.trim().is_empty()),
+            image: None,
+            is_active: parse_opt_bool(&fields, "is_active")?,
+            sort_order: parse_opt_i32(&fields, "sort_order")?,
+        };
+        Ok(CategoryPayload {
+            request,
+            image_path,
+        })
+    } else {
+        let bytes = read_body_bytes(payload).await?;
+        let request: AdminCategoryRequest = serde_json::from_slice(&bytes)
+            .map_err(|e| ApiError::BadRequest(format!("Invalid JSON body: {e}")))?;
+        Ok(CategoryPayload {
+            request,
+            image_path: None,
+        })
+    }
+}
+
 pub async fn admin_category_create(
     pool: web::Data<PgPool>,
+    settings: web::Data<Settings>,
     user: AuthUser,
-    body: web::Json<AdminCategoryRequest>,
+    req: HttpRequest,
+    payload: web::Payload,
 ) -> Result<HttpResponse, ApiError> {
     require_admin(&user.0)?;
+    let body = parse_category_payload(&req, payload, &settings.media_dir).await?;
     let slug = body
+        .request
         .slug
         .clone()
-        .unwrap_or_else(|| slugify(&body.name));
+        .unwrap_or_else(|| slugify(&body.request.name));
+    let image = body.image_path.or_else(|| body.request.image.clone());
     let row: AdminCategoryItem = sqlx::query_as(
         "INSERT INTO categories (name, slug, description, image, is_active, sort_order) \
          VALUES ($1, $2, $3, $4, $5, $6) \
          RETURNING id, name, slug, description, image, is_active, sort_order, 0::bigint AS product_count",
     )
-    .bind(&body.name)
+    .bind(&body.request.name)
     .bind(&slug)
-    .bind(body.description.clone().unwrap_or_default())
-    .bind(&body.image)
-    .bind(body.is_active.unwrap_or(true))
-    .bind(body.sort_order.unwrap_or(0))
+    .bind(body.request.description.clone().unwrap_or_default())
+    .bind(&image)
+    .bind(body.request.is_active.unwrap_or(true))
+    .bind(body.request.sort_order.unwrap_or(0))
     .fetch_one(pool.get_ref())
     .await?;
+    let mut row = row;
+    row.image = media_url(row.image.take());
     Ok(HttpResponse::Created().json(row))
 }
 
 pub async fn admin_category_update(
     pool: web::Data<PgPool>,
+    settings: web::Data<Settings>,
     path: web::Path<Uuid>,
     user: AuthUser,
-    body: web::Json<AdminCategoryRequest>,
+    req: HttpRequest,
+    payload: web::Payload,
 ) -> Result<HttpResponse, ApiError> {
     require_admin(&user.0)?;
     let category_id = path.into_inner();
+    let body = parse_category_payload(&req, payload, &settings.media_dir).await?;
     let slug = body
+        .request
         .slug
         .clone()
-        .unwrap_or_else(|| slugify(&body.name));
+        .unwrap_or_else(|| slugify(&body.request.name));
+    let image = body.image_path.or_else(|| body.request.image.clone());
     let result = sqlx::query(
         "UPDATE categories SET name = $1, slug = $2, description = $3, image = $4, \
          is_active = $5, sort_order = $6 WHERE id = $7",
     )
-    .bind(&body.name)
+    .bind(&body.request.name)
     .bind(&slug)
-    .bind(body.description.clone().unwrap_or_default())
-    .bind(&body.image)
-    .bind(body.is_active.unwrap_or(true))
-    .bind(body.sort_order.unwrap_or(0))
+    .bind(body.request.description.clone().unwrap_or_default())
+    .bind(&image)
+    .bind(body.request.is_active.unwrap_or(true))
+    .bind(body.request.sort_order.unwrap_or(0))
     .bind(category_id)
     .execute(pool.get_ref())
     .await?;
@@ -1691,7 +1990,7 @@ pub async fn credential_update(
     Ok(HttpResponse::Ok().json(item))
 }
 
-/// DELETE /api/dashboard/credentials/{pk}/ → 204.
+/// DELETE /api/dashboard/credentials/{pk}/ â†’ 204.
 pub async fn credential_delete(
     pool: web::Data<PgPool>,
     path: web::Path<Uuid>,
@@ -1775,7 +2074,7 @@ pub async fn whatsapp_orders_list(
             let duration_display = o
                 .duration_months
                 .map(|m| crate::models::duration_display(Some(m), o.is_lifetime.unwrap_or(false)))
-                .unwrap_or_else(|| "—".to_string());
+                .unwrap_or_else(|| "â€”".to_string());
             serde_json::json!({
                 "id": o.id,
                 "uuid": o.uuid,

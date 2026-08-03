@@ -44,6 +44,9 @@ services:
       RATE_LIMIT_PURCHASE: ${RATE_LIMIT_PURCHASE:-5}
       WORKERS: 16
       RUST_LOG: info
+      MEDIA_DIR: /app/media
+    volumes:
+      - media:/app/media
     depends_on:
       db:
         condition: service_healthy
@@ -55,9 +58,12 @@ services:
     build: ./nginx
     ports:
       - "${NGINX_PORT:-80}:80"
+    volumes:
+      - media:/usr/share/nginx/media
     depends_on:
       - app
     restart: unless-stopped
 
 volumes:
   pgdata:
+  media:

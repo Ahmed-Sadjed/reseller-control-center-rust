@@ -25,6 +25,8 @@ reqwest = { version = "0.12", features = ["json"] }
 async-trait = "0.1"
 rust_decimal = { version = "1.35", features = ["serde"] }
 aes-gcm = "0.10"
+actix-multipart = "0.7"
+futures-util = "0.3"
 
 [dev-dependencies]
 actix-test = "0.1"

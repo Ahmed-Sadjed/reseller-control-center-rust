@@ -27,6 +27,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 10001 appuser
 
+WORKDIR /app
+RUN mkdir -p /app/media \
+    && chown -R appuser:appuser /app
+
 COPY --from=builder /app/target/release/reseller-control-center-rust /app/reseller-control-center-rust
 
 USER appuser
