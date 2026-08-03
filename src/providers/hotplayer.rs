@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use serde::Deserialize;
 use serde_json::json;
 
 use super::{
@@ -8,20 +7,14 @@ use super::{
     ProviderAdapter,
 };
 
-/// Real HTTP adapter for HotPlayer panels.
+/// Real HTTP adapter for the HotPlayer Reseller API
+/// (https://hotplayer.app/api/v1/reseller/).
 /// Only reachable when USE_MOCK_PROVIDER=false (see factory.rs).
 #[derive(Debug, Clone)]
 pub struct HotPlayerAdapter {
     base_url: String,
     api_token: String,
     client: reqwest::Client,
-}
-
-#[derive(Debug, Deserialize)]
-struct HotPlayerResponse<T> {
-    status: String,
-    message: Option<String>,
-    data: Option<T>,
 }
 
 impl HotPlayerAdapter {
@@ -33,16 +26,39 @@ impl HotPlayerAdapter {
         }
     }
 
-    async fn post_json<T: serde::de::DeserializeOwned>(
+    async fn get_json(&self, path: &str) -> Result<serde_json::Value, ProviderError> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("ApiKey {}", self.api_token))
+            .send()
+            .await
+            .map_err(|e| ProviderError::Request(format!("{url}: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(ProviderError::Remote(format!(
+                "{url}: http {}",
+                resp.status()
+            )));
+        }
+
+        resp.json()
+            .await
+            .map_err(|e| ProviderError::Request(format!("bad response from {url}: {e}")))
+    }
+
+    async fn post_json(
         &self,
         path: &str,
         body: serde_json::Value,
-    ) -> Result<T, ProviderError> {
+    ) -> Result<serde_json::Value, ProviderError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
             .client
             .post(&url)
-            .bearer_auth(&self.api_token)
+            .header("Authorization", format!("ApiKey {}", self.api_token))
+            .header("Content-Type", "application/json; charset=UTF-8")
             .json(&body)
             .send()
             .await
@@ -55,20 +71,20 @@ impl HotPlayerAdapter {
             )));
         }
 
-        let payload: HotPlayerResponse<T> = resp
-            .json()
+        resp.json()
             .await
-            .map_err(|e| ProviderError::Request(format!("bad response from {url}: {e}")))?;
+            .map_err(|e| ProviderError::Request(format!("bad response from {url}: {e}")))
+    }
 
-        if payload.status != "success" {
-            return Err(ProviderError::Remote(
-                payload.message.unwrap_or_else(|| "unknown provider error".to_string()),
-            ));
+    fn subscription_for(&self, ctx: &ProvisionContext) -> Result<&'static str, ProviderError> {
+        match ctx.duration_months {
+            Some(12) => Ok("YEAR_1"),
+            Some(0) | None => Ok("FOREVER"),
+            Some(other) => Err(ProviderError::Remote(format!(
+                "HotPlayer supports only 12-month (YEAR_1) or lifetime (FOREVER) \
+                 subscriptions, got {other} month(s)"
+            ))),
         }
-
-        payload
-            .data
-            .ok_or_else(|| ProviderError::Remote("empty response data".to_string()))
     }
 }
 
@@ -79,104 +95,86 @@ impl ProviderAdapter for HotPlayerAdapter {
     }
 
     async fn check_device(&self, mac: &str) -> Result<DeviceCheckResult, ProviderError> {
-        let data: serde_json::Value = self
-            .post_json(
-                "/api/v1/device/check",
-                json!({ "mac": mac.to_uppercase() }),
-            )
-            .await?;
-        Ok(DeviceCheckResult {
-            allowed: data
-                .get("allowed")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            reason: data.get("reason").and_then(|v| v.as_str()).map(String::from),
-            credits_required: data
-                .get("credits_required")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse().ok()),
-        })
+        let payload = self.get_json(&format!("/check-device/{mac}")).await?;
+        let plan = payload
+            .get("plan")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let expires_at = payload
+            .get("expiration")
+            .and_then(|v| v.as_i64())
+            .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis);
+        match payload.get("status").and_then(|v| v.as_str()) {
+            Some("success") => Ok(DeviceCheckResult {
+                allowed: true,
+                reason: None,
+                credits_required: None,
+                plan,
+                expires_at,
+            }),
+            Some("failed") => Ok(DeviceCheckResult {
+                allowed: false,
+                reason: payload
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                credits_required: None,
+                plan,
+                expires_at,
+            }),
+            _ => Err(ProviderError::Remote(
+                "unexpected check-device response".to_string(),
+            )),
+        }
     }
 
     async fn provision(
         &self,
         ctx: &ProvisionContext,
     ) -> Result<ProvisionedCredential, ProviderError> {
+        let mac = ctx.mac.clone().ok_or_else(|| {
+            ProviderError::Remote("MAC address is required for HotPlayer products".to_string())
+        })?;
+        let subscription = self.subscription_for(ctx)?;
+
         let mut body = serde_json::Map::new();
-        if let Some(u) = &ctx.preferred_username {
-            body.insert("username".into(), json!(u));
+        body.insert("mac".into(), json!(mac));
+        body.insert("subscription".into(), json!(subscription));
+        if let Some(n) = &ctx.note {
+            if !n.trim().is_empty() {
+                body.insert("note".into(), json!(n));
+            }
         }
-        if let Some(p) = &ctx.preferred_password {
-            body.insert("password".into(), json!(p));
+        body.insert("extend".into(), json!(false));
+
+        let payload = self.post_json("/activate", body.into()).await?;
+
+        if payload.get("status").and_then(|v| v.as_str()) != Some("success") {
+            return Err(ProviderError::Remote(
+                payload
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("activation failed")
+                    .to_string(),
+            ));
         }
-        if let Some(t) = &ctx.template_id {
-            body.insert("template_id".into(), json!(t));
-        }
-        if let Some(d) = &ctx.dns_domain_id {
-            body.insert("dns_domain_id".into(), json!(d));
-        }
-        if let Some(m) = &ctx.mac {
-            body.insert("mac".into(), json!(m.to_uppercase()));
-        }
-        let data: serde_json::Value = self.post_json("/api/v1/playlists", body.into()).await?;
+
+        let expires_at = match subscription {
+            "FOREVER" => None,
+            _ => Some(chrono::Utc::now() + chrono::Duration::days(365)),
+        };
 
         Ok(ProvisionedCredential {
-            username: data
-                .get("streaming_username")
-                .and_then(|v| v.as_str())
-                .or_else(|| data.get("external_username").and_then(|v| v.as_str()))
-                .unwrap_or_default()
-                .to_string(),
-            password: data
-                .get("password")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            dns: data
-                .get("dns_domain")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            m3u_url: data.get("m3u_url").and_then(|v| v.as_str()).map(String::from),
-            expires_at: data
-                .get("expires_at")
-                .and_then(|v| v.as_str())
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.with_timezone(&chrono::Utc)),
-            extra: data,
+            username: mac,
+            password: String::new(),
+            dns: None,
+            m3u_url: None,
+            expires_at,
+            extra: payload,
         })
     }
 
     async fn fetch_catalog(&self) -> Result<Vec<CatalogProduct>, ProviderError> {
-        let data: Vec<serde_json::Value> =
-            self.post_json("/api/v1/catalog", json!({})).await?;
-        let mut products = Vec::with_capacity(data.len());
-        for item in data {
-            products.push(CatalogProduct {
-                external_pack_id: item
-                    .get("external_pack_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                name: item
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                duration_months: item
-                    .get("duration_months")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(1) as i32,
-                price: item
-                    .get("price")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or_default(),
-                category: item
-                    .get("category")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-            });
-        }
-        Ok(products)
+        Ok(Vec::new())
     }
 }

@@ -10,6 +10,10 @@ pub struct DeviceCheckResult {
     pub allowed: bool,
     pub reason: Option<String>,
     pub credits_required: Option<Decimal>,
+    /// Panel subscription code (e.g. "YEAR_1", "FOREVER").
+    pub plan: Option<String>,
+    /// Device's current subscription expiry, if the panel reports one.
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// One fully provisioned line returned by a panel (M3U accounts only).
@@ -37,6 +41,7 @@ pub struct ProvisionContext {
     pub order_id: Uuid,
     pub customer_username: String,
     pub mac: Option<String>,
+    pub note: Option<String>,
     pub preferred_username: Option<String>,
     pub preferred_password: Option<String>,
     /// TiviPanel template id / ProMax bouquet id (comes from checkout).

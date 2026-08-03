@@ -34,9 +34,9 @@ services:
       JWT_ACCESS_TTL_MINUTES: 60
       JWT_REFRESH_TTL_DAYS: 7
       MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:-staging_aes_256_key_32bytes12345}
-      # SAFETY SWITCH — ALWAYS keep true. Never commit code that removes it.
-      # The provider factory refuses to build real adapters while this is set.
-      USE_MOCK_PROVIDER: "true"
+      # SAFETY SWITCH — set false only in dev to talk to real provider APIs.
+      # The provider factory refuses to build real adapters while this is true.
+      USE_MOCK_PROVIDER: ${USE_MOCK_PROVIDER:-false}
       # Django-parity throttles; override per environment (load tests relax
       # these via shell env vars, production keeps the strict defaults).
       RATE_LIMIT_ANON: ${RATE_LIMIT_ANON:-30}

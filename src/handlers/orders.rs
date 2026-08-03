@@ -87,8 +87,9 @@ pub async fn create_order(
     }
 
     // Django parity: the provider drives device requirements.
-    let adapter_key: String = sqlx::query_scalar(
-        "SELECT COALESCE(p.adapter_key, 'mock') FROM product_variants pv \
+    let provider_info: (String, Option<String>, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT COALESCE(p.adapter_key, 'mock'), p.api_endpoint, p.api_token \
+         FROM product_variants pv \
          JOIN products pr ON pr.id = pv.product_id \
          LEFT JOIN providers p ON p.id = pr.provider_id \
          WHERE pv.id = $1",
@@ -96,7 +97,9 @@ pub async fn create_order(
     .bind(body.variant_id)
     .fetch_optional(pool.get_ref())
     .await?
-    .unwrap_or_else(|| "mock".to_string());
+    .unwrap_or_else(|| ("mock".to_string(), None, None));
+
+    let (adapter_key, api_endpoint, api_token) = provider_info;
 
     if adapter_key == "hotplayer" {
         if body.quantity != 1 {
@@ -113,7 +116,11 @@ pub async fn create_order(
 
     // MAC validation via provider adapter when provided.
     if let Some(mac) = &body.mac {
-        let provider = crate::providers::get_provider(&adapter_key, None, None, &settings)?;
+        let token = api_token
+            .as_deref()
+            .and_then(|t| String::from_utf8(t.to_vec()).ok());
+        let provider =
+            crate::providers::get_provider(&adapter_key, api_endpoint.as_deref(), token.as_deref(), &settings)?;
         let check = provider.check_device(mac).await?;
         if !check.allowed {
             return Err(ApiError::bad_request(
@@ -344,7 +351,7 @@ pub async fn check_device(
     }
     let valid_mac = mac.len() == 17
         && mac.split(':').count() == 6
-        && mac.split(':').all(|octet| octet.len() == 2 && octet.chars().all(|c| c.is_ascii_hexdigit()));
+        && mac.split(':').all(|octet| octet.len() == 2 && octet.chars().all(|c| c.is_ascii_alphanumeric()));
     if !valid_mac {
         return Err(ApiError::bad_request(
             "Invalid MAC address. Use format XX:XX:XX:XX:XX:XX",
@@ -379,14 +386,27 @@ pub async fn check_device(
     )?;
 
     match adapter.check_device(&mac).await {
-        Ok(result) if result.allowed => Ok(HttpResponse::Ok().json(serde_json::json!({
-            "found": true,
-            "mac": mac,
-            "plan": null,
-            "expires_at": null,
-            "days_remaining": null,
-            "status": "active",
-        }))),
+        Ok(result) if result.allowed => {
+            let now = chrono::Utc::now();
+            let status = if result.plan.as_deref() == Some("FOREVER") {
+                "lifetime"
+            } else if result.expires_at.is_some_and(|e| e > now) {
+                "active"
+            } else {
+                "expired"
+            };
+            let expires_at = result
+                .expires_at
+                .map(|e| e.format("%Y-%m-%d").to_string());
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "found": true,
+                "mac": mac,
+                "plan": result.plan,
+                "expires_at": expires_at,
+                "days_remaining": null,
+                "status": status,
+            })))
+        }
         Ok(result) => Ok(HttpResponse::Ok().json(serde_json::json!({
             "found": false,
             "mac": mac,

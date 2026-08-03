@@ -260,6 +260,7 @@ pub async fn fulfill_order(
         order_id: order.uuid,
         customer_username,
         mac: order.mac.clone(),
+        note: order.note.clone(),
         preferred_username: order.username.clone(),
         preferred_password: order.password.clone(),
         template_id: order.template_id.clone(),

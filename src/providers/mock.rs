@@ -39,7 +39,7 @@ fn valid_mac(mac: &str) -> bool {
     mac.len() == 17
         && mac
             .split(':')
-            .all(|octet| octet.len() == 2 && octet.chars().all(|c| c.is_ascii_hexdigit()))
+            .all(|octet| octet.len() == 2 && octet.chars().all(|c| c.is_ascii_alphanumeric()))
 }
 
 fn expires_after(duration_months: Option<i32>) -> Option<DateTime<Utc>> {
@@ -59,12 +59,16 @@ impl ProviderAdapter for MockAdapter {
                 allowed: true,
                 reason: None,
                 credits_required: Some(Decimal::from(0)),
+                plan: None,
+                expires_at: None,
             })
         } else {
             Ok(DeviceCheckResult {
                 allowed: false,
                 reason: Some("invalid MAC address format".to_string()),
                 credits_required: None,
+                plan: None,
+                expires_at: None,
             })
         }
     }
@@ -162,6 +166,7 @@ mod tests {
             order_id: Uuid::new_v4(),
             customer_username: "reseller".to_string(),
             mac: None,
+            note: None,
             preferred_username: None,
             preferred_password: None,
             template_id: None,
@@ -186,7 +191,7 @@ mod tests {
         for bad in [
             "invalid",
             "AA:BB:CC:DD:EE",
-            "AA:BB:CC:DD:EE:GG",
+            "AA:BB:CC:DD:EE:!!",
             "AABBCCDDEEFF",
             "AA:BB:CC:DD:EE:F",
             "",

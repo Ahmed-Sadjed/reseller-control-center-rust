@@ -29,6 +29,7 @@ pub struct CredentialWithPassword {
     pub order_id: Uuid,
     pub external_username: String,
     pub streaming_username: Option<String>,
+    pub username: String,
     pub password: String,
     pub dns_domain: String,
     pub m3u_url: String,
@@ -50,6 +51,10 @@ impl Credential {
             order_id: self.order_id,
             external_username: self.external_username.clone(),
             streaming_username: self.streaming_username.clone(),
+            username: self
+                .streaming_username
+                .clone()
+                .unwrap_or_else(|| self.external_username.clone()),
             password,
             dns_domain: self.dns_domain.clone(),
             m3u_url: self.m3u_url.clone(),
