@@ -1,4 +1,4 @@
-﻿use actix_test::TestServer;
+use actix_test::TestServer;
 use actix_web::http::StatusCode;
 use reseller_control_center_rust::{
     app::build_app, config::Settings, db, queue, utils::crypto::hash_password,
@@ -123,22 +123,23 @@ async fn seed_user(
 }
 
 async fn seed_catalog(pool: &PgPool) -> Uuid {
-    let provider_id: Uuid =
-        match sqlx::query_scalar::<_, Uuid>("SELECT id FROM providers WHERE slug = 'test-provider'")
-            .fetch_optional(pool)
-            .await
-            .unwrap()
-        {
-            Some(id) => id,
-            None => sqlx::query_scalar::<_, Uuid>(
-                "INSERT INTO providers (name, slug, adapter_key, api_endpoint) \
+    let provider_id: Uuid = match sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM providers WHERE slug = 'test-provider'",
+    )
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+    {
+        Some(id) => id,
+        None => sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO providers (name, slug, adapter_key, api_endpoint) \
                  VALUES ('Test Provider', 'test-provider', 'mock', 'https://panel.mock.invalid') \
                  RETURNING id",
-            )
-            .fetch_one(pool)
-            .await
-            .unwrap(),
-        };
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap(),
+    };
 
     let category_id: Uuid =
         match sqlx::query_scalar::<_, Uuid>("SELECT id FROM categories WHERE slug = 'test-cat'")
@@ -238,9 +239,8 @@ async fn full_purchase_flow_through_redis_stream() {
     seed_user(&pool, &username, "testpass123", "RESELLER", "1000.00").await;
     let variant_id = seed_catalog(&pool).await;
 
-    let server = actix_test::start(move || {
-        build_app(pool.clone(), settings.clone(), redis_conn.clone())
-    });
+    let server =
+        actix_test::start(move || build_app(pool.clone(), settings.clone(), redis_conn.clone()));
 
     // health
     let resp = server.get("/health").send().await.unwrap();
@@ -256,7 +256,10 @@ async fn full_purchase_flow_through_redis_stream() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["count"], 1, "catalog count must be paginated");
-    assert!(body["total_pages"].is_number(), "total_pages must be present");
+    assert!(
+        body["total_pages"].is_number(),
+        "total_pages must be present"
+    );
     let products = body["results"].as_array().unwrap();
     assert!(
         products.iter().any(|p| p["name"] == "Test Plan"),
@@ -382,7 +385,11 @@ async fn full_purchase_flow_through_redis_stream() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = resp.json().await.unwrap();
     let items = body["results"].as_array().unwrap();
-    assert_eq!(items.len(), 1, "credentials list must contain the credential");
+    assert_eq!(
+        items.len(),
+        1,
+        "credentials list must contain the credential"
+    );
     assert!(
         items[0]["username"].as_str().is_some(),
         "list item must expose username"
@@ -431,9 +438,8 @@ async fn refresh_rotation_blacklists_old_token() {
     let username = format!("refresh_user_{}", std::process::id());
     seed_user(&pool, &username, "testpass123", "RESELLER", "500.00").await;
 
-    let server = actix_test::start(move || {
-        build_app(pool.clone(), settings.clone(), redis_conn.clone())
-    });
+    let server =
+        actix_test::start(move || build_app(pool.clone(), settings.clone(), redis_conn.clone()));
 
     let login_body = login(&server, &username, "testpass123").await;
     let access = login_body["access"].as_str().unwrap();
@@ -453,7 +459,7 @@ async fn refresh_rotation_blacklists_old_token() {
     // old access token still valid until logout
     let resp = server
         .get("/api/auth/me")
-        .append_header(auth_header(&access))
+        .append_header(auth_header(access))
         .send()
         .await
         .unwrap();
@@ -505,9 +511,8 @@ async fn reseller_is_forbidden_on_admin_endpoints() {
     let username = format!("rbac_user_{}", std::process::id());
     seed_user(&pool, &username, "testpass123", "RESELLER", "500.00").await;
 
-    let server = actix_test::start(move || {
-        build_app(pool.clone(), settings.clone(), redis_conn.clone())
-    });
+    let server =
+        actix_test::start(move || build_app(pool.clone(), settings.clone(), redis_conn.clone()));
 
     let login_body = login(&server, &username, "testpass123").await;
     let access = login_body["access"].as_str().unwrap();
@@ -539,9 +544,8 @@ async fn unauthenticated_requests_rejected() {
         .await
         .unwrap();
 
-    let server = actix_test::start(move || {
-        build_app(pool.clone(), settings.clone(), redis_conn.clone())
-    });
+    let server =
+        actix_test::start(move || build_app(pool.clone(), settings.clone(), redis_conn.clone()));
 
     let resp = server.get("/api/auth/me").send().await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -579,9 +583,8 @@ async fn async_purchase_enqueued_via_redis_stream() {
     seed_user(&pool, &username, "testpass123", "RESELLER", "1000.00").await;
     let variant_id = seed_catalog(&pool).await;
 
-    let server = actix_test::start(move || {
-        build_app(pool.clone(), settings.clone(), redis_conn.clone())
-    });
+    let server =
+        actix_test::start(move || build_app(pool.clone(), settings.clone(), redis_conn.clone()));
 
     let login_body = login(&server, &username, "testpass123").await;
     let access = login_body["access"].as_str().unwrap();
@@ -655,9 +658,8 @@ async fn purchase_throttle_rejects_after_five_per_minute() {
     let username = format!("throttle_user_{}", std::process::id());
     seed_user(&pool, &username, "testpass123", "RESELLER", "500.00").await;
 
-    let server = actix_test::start(move || {
-        build_app(pool.clone(), settings.clone(), redis_conn.clone())
-    });
+    let server =
+        actix_test::start(move || build_app(pool.clone(), settings.clone(), redis_conn.clone()));
 
     let login_body = login(&server, &username, "testpass123").await;
     let access = login_body["access"].as_str().unwrap();
@@ -689,9 +691,7 @@ async fn purchase_throttle_rejects_after_five_per_minute() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(
-        resp.headers()
-            .get("retry-after")
-            .is_some(),
+        resp.headers().get("retry-after").is_some(),
         "429 must carry a Retry-After header"
     );
     let body: Value = resp.json().await.unwrap();

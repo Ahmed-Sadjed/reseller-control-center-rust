@@ -18,8 +18,8 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("failed to run database migrations");
 
-    let redis_client = redis::Client::open(settings.redis_url.clone())
-        .expect("failed to create redis client");
+    let redis_client =
+        redis::Client::open(settings.redis_url.clone()).expect("failed to create redis client");
     let redis_conn = redis_client
         .get_multiplexed_async_connection()
         .await
@@ -35,7 +35,7 @@ async fn main() -> std::io::Result<()> {
         });
     }
 
-    let bind_addr = format!("0.0.0.0:8080");
+    let bind_addr = "0.0.0.0:8080".to_string();
     let workers = settings.workers;
     tracing::info!(bind_addr = %bind_addr, workers = workers, "starting actix server");
 

@@ -1,8 +1,4 @@
-use reseller_control_center_rust::{
-    config::Settings,
-    db,
-    utils::crypto::hash_password,
-};
+use reseller_control_center_rust::{config::Settings, db, utils::crypto::hash_password};
 
 #[actix_web::main]
 async fn main() -> anyhow::Result<()> {
@@ -10,7 +6,9 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::create_pool(&settings.database_url).await?;
 
     let username = std::env::args().nth(1).unwrap_or_else(|| "admin".into());
-    let password = std::env::args().nth(2).unwrap_or_else(|| "admin12345".into());
+    let password = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "admin12345".into());
     let role = std::env::args().nth(3).unwrap_or_else(|| "ADMIN".into());
 
     let hash = hash_password(&password).map_err(anyhow::Error::msg)?;

@@ -4,6 +4,22 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+type CredentialRow = (
+    Uuid,
+    Option<String>,
+    Option<String>,
+    Option<chrono::DateTime<chrono::Utc>>,
+    bool,
+    Option<String>,
+    String,
+    Uuid,
+    chrono::DateTime<chrono::Utc>,
+    Value,
+    Option<Value>,
+    chrono::DateTime<chrono::Utc>,
+    Uuid,
+);
+
 use crate::{
     config::Settings,
     error::ApiError,
@@ -119,12 +135,18 @@ pub async fn create_order(
         let token = api_token
             .as_deref()
             .and_then(|t| String::from_utf8(t.to_vec()).ok());
-        let provider =
-            crate::providers::get_provider(&adapter_key, api_endpoint.as_deref(), token.as_deref(), &settings)?;
+        let provider = crate::providers::get_provider(
+            &adapter_key,
+            api_endpoint.as_deref(),
+            token.as_deref(),
+            &settings,
+        )?;
         let check = provider.check_device(mac).await?;
         if !check.allowed {
             return Err(ApiError::bad_request(
-                check.reason.unwrap_or_else(|| "device not allowed".to_string()),
+                check
+                    .reason
+                    .unwrap_or_else(|| "device not allowed".to_string()),
             ));
         }
     }
@@ -149,7 +171,10 @@ pub async fn create_order(
     .await
     {
         Ok(r) => r,
-        Err(ReservationError::InsufficientCredits { required, available }) => {
+        Err(ReservationError::InsufficientCredits {
+            required,
+            available,
+        }) => {
             return Err(ApiError::bad_request(format!(
                 "Insufficient credits. Required: {required}, Available: {available}"
             )));
@@ -174,12 +199,11 @@ pub async fn create_order(
     if reserved.order.quantity <= settings.async_threshold {
         fulfill_order(pool.get_ref(), settings.get_ref(), order_id).await?;
 
-        let outcome: (String, Option<String>) = sqlx::query_as(
-            "SELECT status, failure_reason FROM orders WHERE uuid = $1",
-        )
-        .bind(order_id)
-        .fetch_one(pool.get_ref())
-        .await?;
+        let outcome: (String, Option<String>) =
+            sqlx::query_as("SELECT status, failure_reason FROM orders WHERE uuid = $1")
+                .bind(order_id)
+                .fetch_one(pool.get_ref())
+                .await?;
 
         let (status, failure_reason) = outcome;
         if status != "COMPLETED" {
@@ -188,13 +212,8 @@ pub async fn create_order(
             ));
         }
 
-        let credentials = load_order_credentials(
-            pool.get_ref(),
-            settings.get_ref(),
-            order_id,
-            user.0.id,
-        )
-        .await?;
+        let credentials =
+            load_order_credentials(pool.get_ref(), settings.get_ref(), order_id, user.0.id).await?;
 
         return Ok(HttpResponse::Created().json(serde_json::json!({
             "order_id": order_id,
@@ -208,7 +227,10 @@ pub async fn create_order(
     }
 
     // Enqueue background fulfillment on the Redis Stream (worker in main.rs).
-    if let Err(e) = crate::queue::enqueue_order(redis_conn.get_ref(), &settings.redis_stream_key, order_id).await {
+    if let Err(e) =
+        crate::queue::enqueue_order(redis_conn.get_ref(), &settings.redis_stream_key, order_id)
+            .await
+    {
         tracing::error!(order_id = %order_id, error = %e, "failed to enqueue order on stream");
     }
 
@@ -272,7 +294,8 @@ pub async fn order_status(
     .fetch_optional(pool.get_ref())
     .await?;
 
-    let (order_id, status, failure_reason) = row.ok_or_else(|| ApiError::NotFound("order".into()))?;
+    let (order_id, status, failure_reason) =
+        row.ok_or_else(|| ApiError::NotFound("order".into()))?;
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "order_id": order_id,
         "status": status,
@@ -289,13 +312,12 @@ pub async fn order_credentials(
     let uuid = path.into_inner();
 
     // Django parity: credentials are only revealed once the order is COMPLETED.
-    let status: Option<String> = sqlx::query_scalar(
-        "SELECT status FROM orders WHERE uuid = $1 AND reseller_id = $2",
-    )
-    .bind(uuid)
-    .bind(user.0.id)
-    .fetch_optional(pool.get_ref())
-    .await?;
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM orders WHERE uuid = $1 AND reseller_id = $2")
+            .bind(uuid)
+            .bind(user.0.id)
+            .fetch_optional(pool.get_ref())
+            .await?;
 
     match status {
         None => return Err(ApiError::NotFound("order".into())),
@@ -351,7 +373,9 @@ pub async fn check_device(
     }
     let valid_mac = mac.len() == 17
         && mac.split(':').count() == 6
-        && mac.split(':').all(|octet| octet.len() == 2 && octet.chars().all(|c| c.is_ascii_alphanumeric()));
+        && mac
+            .split(':')
+            .all(|octet| octet.len() == 2 && octet.chars().all(|c| c.is_ascii_alphanumeric()));
     if !valid_mac {
         return Err(ApiError::bad_request(
             "Invalid MAC address. Use format XX:XX:XX:XX:XX:XX",
@@ -395,9 +419,7 @@ pub async fn check_device(
             } else {
                 "expired"
             };
-            let expires_at = result
-                .expires_at
-                .map(|e| e.format("%Y-%m-%d").to_string());
+            let expires_at = result.expires_at.map(|e| e.format("%Y-%m-%d").to_string());
             Ok(HttpResponse::Ok().json(serde_json::json!({
                 "found": true,
                 "mac": mac,
@@ -453,7 +475,12 @@ struct CredentialListItem {
 fn m3u_host(url: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(url).ok()?;
     match parsed.port() {
-        Some(port) => Some(format!("{}://{}:{}", parsed.scheme(), parsed.host_str()?, port)),
+        Some(port) => Some(format!(
+            "{}://{}:{}",
+            parsed.scheme(),
+            parsed.host_str()?,
+            port
+        )),
         None => Some(format!("{}://{}", parsed.scheme(), parsed.host_str()?)),
     }
 }
@@ -479,9 +506,7 @@ pub async fn credentials_list(
     .fetch_one(pool.get_ref())
     .await?;
 
-    let rows: Vec<(Uuid, Option<String>, Option<String>, Option<chrono::DateTime<chrono::Utc>>,
-        bool, Option<String>, String, Uuid, chrono::DateTime<chrono::Utc>,
-        serde_json::Value, Option<serde_json::Value>, chrono::DateTime<chrono::Utc>, Uuid)> =
+    let rows: Vec<CredentialRow> =
         sqlx::query_as(
             "SELECT cr.id, cr.streaming_username, cr.m3u_url, cr.expires_at, cr.is_revoked, \
                     p.adapter_key, pr.name, o.uuid, o.created_at, cr.data, p.extra_config, cr.created_at, pr.id \
@@ -503,8 +528,21 @@ pub async fn credentials_list(
     let items: Vec<CredentialListItem> = rows
         .into_iter()
         .map(
-            |(id, username, m3u_url, expires_at, is_revoked, adapter_key, product_name,
-              order_uuid, order_created, data, extra_config, created_at, product_id)| {
+            |(
+                id,
+                username,
+                m3u_url,
+                expires_at,
+                is_revoked,
+                adapter_key,
+                product_name,
+                order_uuid,
+                order_created,
+                data,
+                extra_config,
+                created_at,
+                product_id,
+            )| {
                 CredentialListItem {
                     id,
                     username,
@@ -526,12 +564,20 @@ pub async fn credentials_list(
 
     let total_pages = (count as i64 + page_size - 1) / page_size;
     let next: Value = if page < total_pages.max(1) {
-        Value::String(format!("/api/credentials?page={}&page_size={}", page + 1, page_size))
+        Value::String(format!(
+            "/api/credentials?page={}&page_size={}",
+            page + 1,
+            page_size
+        ))
     } else {
         Value::Null
     };
     let previous: Value = if page > 1 {
-        Value::String(format!("/api/credentials?page={}&page_size={}", page - 1, page_size))
+        Value::String(format!(
+            "/api/credentials?page={}&page_size={}",
+            page - 1,
+            page_size
+        ))
     } else {
         Value::Null
     };

@@ -88,7 +88,10 @@ mod tests {
 
         let refresh = decode_token(&pair.refresh, SECRET).unwrap();
         assert_eq!(refresh.sub, user_id.to_string());
-        assert_ne!(access.jti, refresh.jti, "access and refresh must have distinct jti");
+        assert_ne!(
+            access.jti, refresh.jti,
+            "access and refresh must have distinct jti"
+        );
     }
 
     #[test]

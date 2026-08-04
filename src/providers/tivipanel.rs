@@ -44,16 +44,14 @@ pub struct TiviNewLine {
 /// scheme://host[:port] extracted from an api_endpoint like
 /// `https://api.tivipanel.net/reseller/panel_api.php`.
 pub fn base_dns_from_api_url(api_endpoint: &str) -> Result<String, ProviderError> {
-    let url = Url::parse(api_endpoint)
-        .map_err(|e| ProviderError::Request(format!("invalid api_endpoint '{api_endpoint}': {e}")))?;
+    let url = Url::parse(api_endpoint).map_err(|e| {
+        ProviderError::Request(format!("invalid api_endpoint '{api_endpoint}': {e}"))
+    })?;
     let scheme = url.scheme();
-    let host = url
-        .host_str()
-        .ok_or_else(|| ProviderError::Request(format!("api_endpoint '{api_endpoint}' has no host")))?;
-    let port = url
-        .port()
-        .map(|p| format!(":{p}"))
-        .unwrap_or_default();
+    let host = url.host_str().ok_or_else(|| {
+        ProviderError::Request(format!("api_endpoint '{api_endpoint}' has no host"))
+    })?;
+    let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
     Ok(format!("{scheme}://{host}{port}"))
 }
 
@@ -115,7 +113,9 @@ pub fn build_new_url(
     country: Option<&str>,
 ) -> Result<Url, ProviderError> {
     let mut url = Url::parse(api_endpoint).map_err(|e| {
-        ProviderError::Request(format!("invalid tivipanel api_endpoint '{api_endpoint}': {e}"))
+        ProviderError::Request(format!(
+            "invalid tivipanel api_endpoint '{api_endpoint}': {e}"
+        ))
     })?;
     url.query_pairs_mut()
         .append_pair("action", "new")
@@ -141,7 +141,9 @@ pub fn build_renew_url(
     package: i32,
 ) -> Result<Url, ProviderError> {
     let mut url = Url::parse(api_endpoint).map_err(|e| {
-        ProviderError::Request(format!("invalid tivipanel api_endpoint '{api_endpoint}': {e}"))
+        ProviderError::Request(format!(
+            "invalid tivipanel api_endpoint '{api_endpoint}': {e}"
+        ))
     })?;
     url.query_pairs_mut()
         .append_pair("action", "renew")
@@ -160,7 +162,9 @@ pub fn build_delete_url(
     username: &str,
 ) -> Result<Url, ProviderError> {
     let mut url = Url::parse(api_endpoint).map_err(|e| {
-        ProviderError::Request(format!("invalid tivipanel api_endpoint '{api_endpoint}': {e}"))
+        ProviderError::Request(format!(
+            "invalid tivipanel api_endpoint '{api_endpoint}': {e}"
+        ))
     })?;
     url.query_pairs_mut()
         .append_pair("action", "delete")
@@ -173,7 +177,9 @@ pub fn build_delete_url(
 /// action=package URL (catalog: display names only).
 pub fn build_catalog_url(api_endpoint: &str, api_key: &str) -> Result<Url, ProviderError> {
     let mut url = Url::parse(api_endpoint).map_err(|e| {
-        ProviderError::Request(format!("invalid tivipanel api_endpoint '{api_endpoint}': {e}"))
+        ProviderError::Request(format!(
+            "invalid tivipanel api_endpoint '{api_endpoint}': {e}"
+        ))
     })?;
     url.query_pairs_mut()
         .append_pair("action", "package")
@@ -233,7 +239,10 @@ impl TiviPanelAdapter {
             .await
             .map_err(|e| ProviderError::Request(format!("{url}: {e}")))?;
         if !resp.status().is_success() {
-            return Err(ProviderError::Remote(format!("{url}: http {}", resp.status())));
+            return Err(ProviderError::Remote(format!(
+                "{url}: http {}",
+                resp.status()
+            )));
         }
         resp.text()
             .await
@@ -316,7 +325,9 @@ mod tests {
         assert!(url.contains("country=US"));
         assert!(url.contains("api_key=KEY123"));
 
-        let lifetime = build_new_url(ENDPOINT, "K", 0, None, "n", None).unwrap().to_string();
+        let lifetime = build_new_url(ENDPOINT, "K", 0, None, "n", None)
+            .unwrap()
+            .to_string();
         assert!(lifetime.contains("package=0"));
         assert!(!lifetime.contains("template"));
         assert!(!lifetime.contains("country"));
@@ -339,8 +350,12 @@ mod tests {
 
     #[test]
     fn failed_response_is_remote_error() {
-        let err = parse_new_response(r#"{"status":"false","message":"invalid api key"}"#, "dns", None)
-            .unwrap_err();
+        let err = parse_new_response(
+            r#"{"status":"false","message":"invalid api key"}"#,
+            "dns",
+            None,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("invalid api key"));
     }
 

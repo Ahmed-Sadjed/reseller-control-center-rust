@@ -138,7 +138,7 @@ pub async fn products(
     let rows = sqlx::query_as::<_, ProductRow>(
         "SELECT p.id, p.name, p.category_id, c.name AS category_name, c.slug AS category_slug, \
                 p.provider_id, prov.name AS provider_name, prov.adapter_key AS provider_key, \
-                p.description, p.image, p.is_active, p.is_manual, p.credential_type, p.created_at, p.updated_at, \
+                p.description, p.image, p.is_active, p.is_manual, \
                 (SELECT count(*) FROM credentials cr JOIN orders o ON o.id = cr.order_id \
                   WHERE o.product_id = p.id AND cr.is_revoked = false)::bigint AS available_credentials \
          FROM products p \
@@ -221,7 +221,10 @@ pub async fn products(
     conn.set_ex::<_, _, ()>(&cache_key, &body, PRODUCTS_CACHE_TTL)
         .await?;
     if locked {
-        let _: redis::RedisResult<()> = redis::cmd("DEL").arg(&lock_key).query_async(&mut conn).await;
+        let _: redis::RedisResult<()> = redis::cmd("DEL")
+            .arg(&lock_key)
+            .query_async(&mut conn)
+            .await;
     }
 
     Ok(HttpResponse::Ok()
@@ -231,12 +234,7 @@ pub async fn products(
 
 /// Relative next/previous links mirroring Django's pagination (frontend only
 /// consumes `total_pages`/`results`, so relative paths are sufficient).
-fn build_page_url(
-    req: &HttpRequest,
-    query: &ProductQuery,
-    page: i64,
-    page_size: i64,
-) -> String {
+fn build_page_url(req: &HttpRequest, query: &ProductQuery, page: i64, page_size: i64) -> String {
     let mut params: Vec<(String, String)> = Vec::new();
     if let Some(s) = &query.search {
         params.push(("search".to_string(), s.clone()));
@@ -273,9 +271,6 @@ struct ProductRow {
     image: Option<String>,
     is_active: bool,
     is_manual: bool,
-    credential_type: Option<String>,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
     available_credentials: Option<i64>,
 }
 

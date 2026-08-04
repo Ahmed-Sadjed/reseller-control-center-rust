@@ -4,12 +4,7 @@ use sqlx::PgPool;
 use std::{future::Future, pin::Pin};
 use uuid::Uuid;
 
-use crate::{
-    config::Settings,
-    error::ApiError,
-    models::User,
-    utils::jwt::decode_token,
-};
+use crate::{config::Settings, error::ApiError, models::User, utils::jwt::decode_token};
 
 pub struct AuthUser(pub User);
 
@@ -25,7 +20,7 @@ impl FromRequest for AuthUser {
     fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
         let settings = req
             .app_data::<web::Data<Settings>>()
-            .map(web::Data::clone)
+            .cloned()
             .unwrap_or_else(|| web::Data::new(Settings::from_env()));
         let pool = match req.app_data::<web::Data<PgPool>>() {
             Some(p) => p.clone(),
@@ -38,9 +33,7 @@ impl FromRequest for AuthUser {
         let redis_conn = match req.app_data::<web::Data<redis::aio::MultiplexedConnection>>() {
             Some(r) => r.clone(),
             None => {
-                return Box::pin(async {
-                    Err(ApiError::Internal("redis not configured".into()))
-                });
+                return Box::pin(async { Err(ApiError::Internal("redis not configured".into())) });
             }
         };
 
@@ -52,8 +45,8 @@ impl FromRequest for AuthUser {
         };
 
         Box::pin(async move {
-            let claims = decode_token(&token, &settings.jwt_secret)
-                .map_err(|_| ApiError::Unauthorized)?;
+            let claims =
+                decode_token(&token, &settings.jwt_secret).map_err(|_| ApiError::Unauthorized)?;
 
             // Check Redis blacklist: key `blacklist:{jti}` => token was logged out.
             let mut conn = redis_conn.get_ref().clone();
@@ -70,10 +63,7 @@ impl FromRequest for AuthUser {
             // User lookup: Redis cache `user:{id}` (60s) with DB fallback, so
             // authenticated requests don't hammer the connection pool.
             let cache_key = format!("user:{user_id}");
-            let user: User = match conn
-                .get::<_, Option<String>>(cache_key.clone())
-                .await
-            {
+            let user: User = match conn.get::<_, Option<String>>(cache_key.clone()).await {
                 Ok(Some(body)) => match serde_json::from_str::<User>(&body) {
                     Ok(u) if u.is_active => u,
                     _ => load_user(pool.get_ref(), user_id).await?,

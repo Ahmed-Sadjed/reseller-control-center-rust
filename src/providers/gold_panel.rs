@@ -59,7 +59,9 @@ pub fn build_new_url(
     notes: Option<&str>,
 ) -> Result<Url, ProviderError> {
     let mut url = Url::parse(api_endpoint).map_err(|e| {
-        ProviderError::Request(format!("invalid goldpanel api_endpoint '{api_endpoint}': {e}"))
+        ProviderError::Request(format!(
+            "invalid goldpanel api_endpoint '{api_endpoint}': {e}"
+        ))
     })?;
     url.query_pairs_mut()
         .append_pair("action", "new")
@@ -94,9 +96,8 @@ pub fn parse_new_response(
             .clone(),
         other => other,
     };
-    let line: GoldPanelLine = serde_json::from_value(result.clone()).map_err(|e| {
-        ProviderError::Remote(format!("goldpanel: malformed line ({e}): {result}"))
-    })?;
+    let line: GoldPanelLine = serde_json::from_value(result.clone())
+        .map_err(|e| ProviderError::Remote(format!("goldpanel: malformed line ({e}): {result}")))?;
     if line.status != "true" {
         return Err(ProviderError::Remote(format!(
             "Gold Panel error: {}",
@@ -118,12 +119,11 @@ pub fn parse_new_response(
     let mut username = line.user_id.clone();
     let mut password = String::new();
     if !line.url.is_empty() {
-        let query: std::collections::HashMap<String, String> =
-            Url::parse(&line.url)
-                .map_err(|e| ProviderError::Remote(format!("goldpanel: bad m3u url: {e}")))?
-                .query_pairs()
-                .into_owned()
-                .collect();
+        let query: std::collections::HashMap<String, String> = Url::parse(&line.url)
+            .map_err(|e| ProviderError::Remote(format!("goldpanel: bad m3u url: {e}")))?
+            .query_pairs()
+            .into_owned()
+            .collect();
         username = query
             .get("username")
             .filter(|s| !s.is_empty())
@@ -183,7 +183,10 @@ impl GoldPanelAdapter {
             .await
             .map_err(|e| ProviderError::Request(format!("{url}: {e}")))?;
         if !resp.status().is_success() {
-            return Err(ProviderError::Remote(format!("{url}: http {}", resp.status())));
+            return Err(ProviderError::Remote(format!(
+                "{url}: http {}",
+                resp.status()
+            )));
         }
         resp.text()
             .await

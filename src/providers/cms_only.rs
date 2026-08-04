@@ -60,7 +60,9 @@ pub fn build_new_url(
     notes: Option<&str>,
 ) -> Result<Url, ProviderError> {
     let mut url = Url::parse(api_endpoint).map_err(|e| {
-        ProviderError::Request(format!("invalid cms_only api_endpoint '{api_endpoint}': {e}"))
+        ProviderError::Request(format!(
+            "invalid cms_only api_endpoint '{api_endpoint}': {e}"
+        ))
     })?;
     url.query_pairs_mut()
         .append_pair("action", "new")
@@ -79,7 +81,13 @@ pub fn build_new_url(
 
 /// Build the streaming m3u url: the panel's `url` when present, otherwise a
 /// synthesized `https://{dns}:{port}/get.php?username=..&password=..`.
-pub fn build_m3u_url(full_url: &str, dns: &str, port: u16, username: &str, password: &str) -> String {
+pub fn build_m3u_url(
+    full_url: &str,
+    dns: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+) -> String {
     if !full_url.is_empty() {
         return full_url.to_string();
     }
@@ -94,9 +102,8 @@ pub fn parse_new_response(
     port: u16,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<ProvisionedCredential, ProviderError> {
-    let parsed: CmsNewLine = serde_json::from_str(body).map_err(|e| {
-        ProviderError::Remote(format!("neo4k: malformed response ({e}): {body}"))
-    })?;
+    let parsed: CmsNewLine = serde_json::from_str(body)
+        .map_err(|e| ProviderError::Remote(format!("neo4k: malformed response ({e}): {body}")))?;
     if parsed.status == "error" {
         let msg = if !parsed.message.is_empty() {
             parsed.message
@@ -105,7 +112,11 @@ pub fn parse_new_response(
         };
         return Err(ProviderError::Remote(format!(
             "Provider error: {}",
-            if msg.is_empty() { "line creation failed".to_string() } else { msg }
+            if msg.is_empty() {
+                "line creation failed".to_string()
+            } else {
+                msg
+            }
         )));
     }
     if parsed.user_id.is_empty() {
@@ -119,12 +130,11 @@ pub fn parse_new_response(
     let mut username = parsed.user_id.clone();
     let mut password = String::new();
     if !parsed.url.is_empty() {
-        let query: std::collections::HashMap<String, String> =
-            Url::parse(&parsed.url)
-                .map_err(|e| ProviderError::Remote(format!("neo4k: bad m3u url: {e}")))?
-                .query_pairs()
-                .into_owned()
-                .collect();
+        let query: std::collections::HashMap<String, String> = Url::parse(&parsed.url)
+            .map_err(|e| ProviderError::Remote(format!("neo4k: bad m3u url: {e}")))?
+            .query_pairs()
+            .into_owned()
+            .collect();
         username = query
             .get("username")
             .filter(|s| !s.is_empty())
@@ -181,7 +191,10 @@ impl CmsOnlyAdapter {
             .await
             .map_err(|e| ProviderError::Request(format!("{url}: {e}")))?;
         if !resp.status().is_success() {
-            return Err(ProviderError::Remote(format!("{url}: http {}", resp.status())));
+            return Err(ProviderError::Remote(format!(
+                "{url}: http {}",
+                resp.status()
+            )));
         }
         resp.text()
             .await
@@ -307,7 +320,10 @@ mod tests {
     #[test]
     fn defaults_used_from_extra_config() {
         assert_eq!(default_dns_domain(&serde_json::json!({})), "kmapp.xyz");
-        assert_eq!(default_dns_domain(&serde_json::json!({"dns_domain": "ott.example.net"})), "ott.example.net");
+        assert_eq!(
+            default_dns_domain(&serde_json::json!({"dns_domain": "ott.example.net"})),
+            "ott.example.net"
+        );
         assert_eq!(default_port(&serde_json::json!({})), 8080);
         assert_eq!(default_port(&serde_json::json!({"port": 8443})), 8443);
     }

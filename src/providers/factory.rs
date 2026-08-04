@@ -3,17 +3,10 @@ use std::sync::Arc;
 use crate::config::Settings;
 
 use super::{
-    cms_only::CmsOnlyAdapter,
-    error::ProviderError,
-    gold_panel::GoldPanelAdapter,
-    golden_api::GoldenApiAdapter,
-    hotplayer::HotPlayerAdapter,
-    mock::MockAdapter,
-    promax::PromaxAdapter,
-    redfoxx::RedfoxxAdapter,
-    tivipanel::TiviPanelAdapter,
-    whatsapp::WhatsAppAdapter,
-    ProviderAdapter,
+    cms_only::CmsOnlyAdapter, error::ProviderError, gold_panel::GoldPanelAdapter,
+    golden_api::GoldenApiAdapter, hotplayer::HotPlayerAdapter, mock::MockAdapter,
+    promax::PromaxAdapter, redfoxx::RedfoxxAdapter, tivipanel::TiviPanelAdapter,
+    whatsapp::WhatsAppAdapter, ProviderAdapter,
 };
 
 /// SAFETY SWITCH: while USE_MOCK_PROVIDER is enabled (default true), the
@@ -27,7 +20,10 @@ pub fn get_provider(
     settings: &Settings,
 ) -> Result<Arc<dyn ProviderAdapter>, ProviderError> {
     if settings.use_mock_provider {
-        tracing::info!(provider = key, "USE_MOCK_PROVIDER=true: returning MockAdapter");
+        tracing::info!(
+            provider = key,
+            "USE_MOCK_PROVIDER=true: returning MockAdapter"
+        );
         let static_key: &'static str = match key {
             "tivipanel" => "tivipanel",
             "promax" => "promax",
@@ -72,8 +68,13 @@ mod tests {
         let settings = Settings::from_env();
         assert!(settings.use_mock_provider);
 
-        let adapter = get_provider("hotplayer", Some("https://panel.example.com"), Some("tok"), &settings)
-            .expect("factory must succeed");
+        let adapter = get_provider(
+            "hotplayer",
+            Some("https://panel.example.com"),
+            Some("tok"),
+            &settings,
+        )
+        .expect("factory must succeed");
         assert_eq!(
             adapter.name(),
             "hotplayer",
@@ -85,16 +86,26 @@ mod tests {
     fn mock_keeps_real_provider_keys() {
         let settings = Settings::from_env();
         assert_eq!(
-            get_provider("tivipanel", Some("https://api.tivipanel.net"), Some("k"), &settings)
-                .unwrap()
-                .name(),
+            get_provider(
+                "tivipanel",
+                Some("https://api.tivipanel.net"),
+                Some("k"),
+                &settings
+            )
+            .unwrap()
+            .name(),
             "tivipanel",
             "mock adapter must report the real provider key so sync paths behave"
         );
         assert_eq!(
-            get_provider("promax", Some("https://api.promax-dash.com"), Some("k"), &settings)
-                .unwrap()
-                .name(),
+            get_provider(
+                "promax",
+                Some("https://api.promax-dash.com"),
+                Some("k"),
+                &settings
+            )
+            .unwrap()
+            .name(),
             "promax"
         );
         for key in ["golden_api", "neo4k", "goldpanel", "redfoxx", "whatsapp"] {

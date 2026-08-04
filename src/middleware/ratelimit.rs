@@ -59,7 +59,10 @@ where
     type Error = Error;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
-    fn poll_ready(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_ready(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
         self.service.poll_ready(cx)
     }
 
@@ -161,11 +164,13 @@ fn throttle_buckets(
     // authenticated requests: identify the user from the JWT
     if let Some(bearer) = auth_header.and_then(|s| s.strip_prefix("Bearer ")) {
         if let Ok(claims) = decode_token(bearer, &settings.jwt_secret) {
-            let mut buckets =
-                vec![(format!("rl:user:{}", claims.sub), settings.rate_limit_user)];
+            let mut buckets = vec![(format!("rl:user:{}", claims.sub), settings.rate_limit_user)];
             // purchase scope: extra 5/minute on order creation
             if method == Method::POST && (path == "/api/orders" || path == "/api/purchase") {
-                buckets.push((format!("rl:purchase:{}", claims.sub), settings.rate_limit_purchase));
+                buckets.push((
+                    format!("rl:purchase:{}", claims.sub),
+                    settings.rate_limit_purchase,
+                ));
             }
             return Some(buckets);
         }

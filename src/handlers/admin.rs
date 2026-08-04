@@ -4,13 +4,7 @@ use serde::Deserialize;
 use sqlx::{PgPool, QueryBuilder};
 use uuid::Uuid;
 
-use crate::{
-    config::Settings,
-    error::ApiError,
-    middleware::AuthUser,
-    models::User,
-    providers,
-};
+use crate::{config::Settings, error::ApiError, middleware::AuthUser, models::User, providers};
 
 fn require_admin(user: &User) -> Result<(), ApiError> {
     if user.role != "ADMIN" {
@@ -151,7 +145,9 @@ pub async fn update_product(
     if let Some(credential_type) = &body.credential_type {
         qb.push(", credential_type = ").push_bind(credential_type);
     }
-    qb.push(" WHERE id = ").push_bind(product_id).push(" RETURNING ");
+    qb.push(" WHERE id = ")
+        .push_bind(product_id)
+        .push(" RETURNING ");
     qb.push(PRODUCT_COLUMNS);
 
     let product = qb
@@ -172,10 +168,11 @@ pub async fn delete_product(
     require_admin(&user.0)?;
     let product_id = path.into_inner();
 
-    let result = sqlx::query("UPDATE products SET is_active = false, updated_at = now() WHERE id = $1")
-        .bind(product_id)
-        .execute(pool.get_ref())
-        .await?;
+    let result =
+        sqlx::query("UPDATE products SET is_active = false, updated_at = now() WHERE id = $1")
+            .bind(product_id)
+            .execute(pool.get_ref())
+            .await?;
 
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound("product not found".into()));
@@ -190,6 +187,8 @@ pub struct SyncProvidersRequest {
     pub provider_id: Option<Uuid>,
 }
 
+type ProviderRow = (Uuid, String, String, Option<String>, Option<Vec<u8>>);
+
 pub async fn sync_providers(
     pool: web::Data<PgPool>,
     settings: web::Data<Settings>,
@@ -198,31 +197,26 @@ pub async fn sync_providers(
 ) -> Result<HttpResponse, ApiError> {
     require_admin(&user.0)?;
 
-    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
-        "SELECT id, slug, adapter_key, api_endpoint, api_token FROM providers",
-    );
+    let mut qb: QueryBuilder<sqlx::Postgres> =
+        QueryBuilder::new("SELECT id, slug, adapter_key, api_endpoint, api_token FROM providers");
     if let Some(provider_id) = body.provider_id {
         qb.push(" WHERE id = ").push_bind(provider_id);
     }
     qb.push(" ORDER BY name");
 
-    let providers_rows: Vec<(Uuid, String, String, Option<String>, Option<Vec<u8>>)> = qb
-        .build_query_as()
-        .fetch_all(pool.get_ref())
-        .await?;
+    let providers_rows: Vec<ProviderRow> = qb.build_query_as().fetch_all(pool.get_ref()).await?;
 
     if providers_rows.is_empty() {
         return Err(ApiError::NotFound("no providers configured".into()));
     }
 
     // Case-insensitive category name -> id lookup, created on demand.
-    let mut category_map: std::collections::HashMap<String, Uuid> = sqlx::query_as(
-        "SELECT lower(name), id FROM categories",
-    )
-    .fetch_all(pool.get_ref())
-    .await?
-    .into_iter()
-    .collect();
+    let mut category_map: std::collections::HashMap<String, Uuid> =
+        sqlx::query_as("SELECT lower(name), id FROM categories")
+            .fetch_all(pool.get_ref())
+            .await?
+            .into_iter()
+            .collect();
 
     let mut results = Vec::new();
     for (provider_id, slug, adapter_key, endpoint, api_token) in providers_rows {
@@ -241,20 +235,19 @@ pub async fn sync_providers(
         for item in &catalog {
             if let Some(category) = &item.category {
                 let key = category.to_lowercase();
-                if !category_map.contains_key(&key) {
+                if let std::collections::hash_map::Entry::Vacant(entry) = category_map.entry(key) {
                     sqlx::query(
                         "INSERT INTO categories (name, slug) VALUES ($1, $1) ON CONFLICT (slug) DO NOTHING",
                     )
                     .bind(category)
                     .execute(pool.get_ref())
                     .await?;
-                    let cat_id: Uuid = sqlx::query_scalar(
-                        "SELECT id FROM categories WHERE lower(name) = $1",
-                    )
-                    .bind(&key)
-                    .fetch_one(pool.get_ref())
-                    .await?;
-                    category_map.insert(key, cat_id);
+                    let cat_id: Uuid =
+                        sqlx::query_scalar("SELECT id FROM categories WHERE lower(name) = $1")
+                            .bind(entry.key())
+                            .fetch_one(pool.get_ref())
+                            .await?;
+                    entry.insert(cat_id);
                 }
             }
         }
@@ -295,7 +288,10 @@ pub async fn sync_providers(
              RETURNING id, external_pack_id",
         );
 
-        let upserted: Vec<(Uuid, Option<i32>)> = product_qb.build_query_as().fetch_all(pool.get_ref()).await?;
+        let upserted: Vec<(Uuid, Option<i32>)> = product_qb
+            .build_query_as()
+            .fetch_all(pool.get_ref())
+            .await?;
         let product_ids: std::collections::HashMap<i32, Uuid> = upserted
             .iter()
             .filter_map(|(id, pack)| pack.map(|p| (p, *id)))
@@ -307,7 +303,13 @@ pub async fn sync_providers(
             .filter_map(|item| {
                 let pack_id = item.external_pack_id.parse::<i32>().ok()?;
                 let product_id = product_ids.get(&pack_id).copied()?;
-                Some((product_id, item.duration_months, item.duration_months <= 0, pack_id, item.price))
+                Some((
+                    product_id,
+                    item.duration_months,
+                    item.duration_months <= 0,
+                    pack_id,
+                    item.price,
+                ))
             })
             .collect();
 
@@ -317,13 +319,16 @@ pub async fn sync_providers(
         );
         let variants_count = variant_rows.len();
         if variants_count > 0 {
-            variant_qb.push_values(variant_rows, |mut b, (product_id, duration, is_lifetime, pack_id, price)| {
-                b.push_bind(product_id)
-                    .push_bind(duration)
-                    .push_bind(is_lifetime)
-                    .push_bind(pack_id)
-                    .push_bind(price);
-            });
+            variant_qb.push_values(
+                variant_rows,
+                |mut b, (product_id, duration, is_lifetime, pack_id, price)| {
+                    b.push_bind(product_id)
+                        .push_bind(duration)
+                        .push_bind(is_lifetime)
+                        .push_bind(pack_id)
+                        .push_bind(price);
+                },
+            );
             variant_qb.push(
                 " ON CONFLICT (product_id, external_pack_id, duration_months) DO UPDATE SET \
                  price_in_credits = EXCLUDED.price_in_credits, updated_at = now()",

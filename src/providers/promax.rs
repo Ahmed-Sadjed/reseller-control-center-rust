@@ -45,10 +45,7 @@ pub fn dns_from_m3u_url(m3u_url: &str) -> Result<String, ProviderError> {
     let host = url
         .host_str()
         .ok_or_else(|| ProviderError::Request(format!("m3u url '{m3u_url}' has no host")))?;
-    let port = url
-        .port()
-        .map(|p| format!(":{p}"))
-        .unwrap_or_default();
+    let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
     Ok(format!("{scheme}://{host}{port}"))
 }
 
@@ -58,9 +55,8 @@ pub fn parse_new_response(
     body: &str,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<ProvisionedCredential, ProviderError> {
-    let parsed: PromaxNewLine = serde_json::from_str(body).map_err(|e| {
-        ProviderError::Remote(format!("promax: malformed response ({e}): {body}"))
-    })?;
+    let parsed: PromaxNewLine = serde_json::from_str(body)
+        .map_err(|e| ProviderError::Remote(format!("promax: malformed response ({e}): {body}")))?;
     if parsed.status != "true" {
         return Err(ProviderError::Remote(format!(
             "promax: {}",
@@ -78,12 +74,11 @@ pub fn parse_new_response(
     }
     let dns = dns_from_m3u_url(&parsed.url)?;
     // The panel's url embeds username=..&password=.. query params.
-    let query: std::collections::HashMap<String, String> =
-        Url::parse(&parsed.url)
-            .map_err(|e| ProviderError::Remote(format!("promax: bad m3u url: {e}")))?
-            .query_pairs()
-            .into_owned()
-            .collect();
+    let query: std::collections::HashMap<String, String> = Url::parse(&parsed.url)
+        .map_err(|e| ProviderError::Remote(format!("promax: bad m3u url: {e}")))?
+        .query_pairs()
+        .into_owned()
+        .collect();
     let username = query.get("username").cloned().unwrap_or_default();
     let password = query.get("password").cloned().unwrap_or_default();
     if username.is_empty() || password.is_empty() {
@@ -196,9 +191,8 @@ pub struct PromaxBouquet {
 /// Parse a `action=bouquet` catalog response. Bouquet ids drive both product
 /// sync (external_pack_id) and the checkout `pack` param.
 pub fn parse_catalog(body: &str) -> Result<Vec<CatalogProduct>, ProviderError> {
-    let bouquets: Vec<PromaxBouquet> = serde_json::from_str(body).map_err(|e| {
-        ProviderError::Remote(format!("promax: malformed catalog ({e}): {body}"))
-    })?;
+    let bouquets: Vec<PromaxBouquet> = serde_json::from_str(body)
+        .map_err(|e| ProviderError::Remote(format!("promax: malformed catalog ({e}): {body}")))?;
     Ok(bouquets
         .into_iter()
         .map(|b| CatalogProduct {
@@ -237,7 +231,10 @@ impl PromaxAdapter {
             .await
             .map_err(|e| ProviderError::Request(format!("{url}: {e}")))?;
         if !resp.status().is_success() {
-            return Err(ProviderError::Remote(format!("{url}: http {}", resp.status())));
+            return Err(ProviderError::Remote(format!(
+                "{url}: http {}",
+                resp.status()
+            )));
         }
         resp.text()
             .await
@@ -308,9 +305,8 @@ impl ProviderAdapter for PromaxAdapter {
         let bouquets: Vec<PromaxBouquet> = serde_json::from_str(&body).map_err(|e| {
             ProviderError::Remote(format!("promax: malformed bouquets ({e}): {body}"))
         })?;
-        Ok(serde_json::to_value(bouquets).map_err(|e| {
-            ProviderError::Request(format!("promax: bouquets serialization: {e}"))
-        })?)
+        Ok(serde_json::to_value(bouquets)
+            .map_err(|e| ProviderError::Request(format!("promax: bouquets serialization: {e}")))?)
     }
 }
 
@@ -324,8 +320,10 @@ mod tests {
     #[test]
     fn dns_extracted_from_m3u_url() {
         assert_eq!(
-            dns_from_m3u_url("http://reseller-domain.com/get.php?username=a&password=b&type=m3u_plus&output=ts")
-                .unwrap(),
+            dns_from_m3u_url(
+                "http://reseller-domain.com/get.php?username=a&password=b&type=m3u_plus&output=ts"
+            )
+            .unwrap(),
             "http://reseller-domain.com"
         );
         assert_eq!(
@@ -358,7 +356,10 @@ mod tests {
         assert_eq!(cred.username, "u1");
         assert_eq!(cred.password, "p1");
         assert_eq!(cred.dns.as_deref(), Some("http://reseller-domain.com"));
-        assert!(cred.m3u_url.unwrap().starts_with("http://reseller-domain.com/get.php"));
+        assert!(cred
+            .m3u_url
+            .unwrap()
+            .starts_with("http://reseller-domain.com/get.php"));
         assert!(cred.expires_at.is_none());
         assert_eq!(cred.extra["user_id"], "123");
     }

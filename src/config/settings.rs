@@ -24,10 +24,13 @@ impl Settings {
         dotenvy::dotenv().ok();
 
         Self {
-            database_url: env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgres://reseller_user:dev_password_123@localhost:5432/reseller_db".to_string()),
-            redis_url: env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string()),
-            jwt_secret: env::var("JWT_SECRET").unwrap_or_else(|_| "super_secret_change_me_32chars!".to_string()),
+            database_url: env::var("DATABASE_URL").unwrap_or_else(|_| {
+                "postgres://reseller_user:dev_password_123@localhost:5432/reseller_db".to_string()
+            }),
+            redis_url: env::var("REDIS_URL")
+                .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
+            jwt_secret: env::var("JWT_SECRET")
+                .unwrap_or_else(|_| "super_secret_change_me_32chars!".to_string()),
             jwt_access_ttl_minutes: env::var("JWT_ACCESS_TTL_MINUTES")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -43,7 +46,10 @@ impl Settings {
                 != "false",
             master_encryption_key: env::var("MASTER_ENCRYPTION_KEY")
                 .unwrap_or_else(|_| "staging_aes_256_key_32bytes12345".to_string()),
-            workers: env::var("WORKERS").ok().and_then(|v| v.parse().ok()).unwrap_or(16),
+            workers: env::var("WORKERS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(16),
             async_threshold: env::var("ASYNC_THRESHOLD")
                 .ok()
                 .and_then(|v| v.parse().ok())

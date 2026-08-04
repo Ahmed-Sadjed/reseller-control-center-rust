@@ -9,7 +9,10 @@ use crate::{
     error::ApiError,
     middleware::AuthUser,
     models::User,
-    utils::{crypto::verify_password, jwt::{decode_token, generate_tokens}},
+    utils::{
+        crypto::verify_password,
+        jwt::{decode_token, generate_tokens},
+    },
 };
 
 #[derive(Debug, Deserialize)]
@@ -76,7 +79,8 @@ pub async fn refresh(
     redis_conn: web::Data<redis::aio::MultiplexedConnection>,
     req: web::Json<RefreshRequest>,
 ) -> Result<HttpResponse, ApiError> {
-    let claims = decode_token(&req.refresh, &settings.jwt_secret).map_err(|_| ApiError::Unauthorized)?;
+    let claims =
+        decode_token(&req.refresh, &settings.jwt_secret).map_err(|_| ApiError::Unauthorized)?;
 
     let mut conn = redis_conn.get_ref().clone();
     let blacklisted: Option<String> = conn
@@ -127,7 +131,8 @@ pub async fn logout(
     redis_conn: web::Data<redis::aio::MultiplexedConnection>,
     req: web::Json<LogoutRequest>,
 ) -> Result<HttpResponse, ApiError> {
-    let claims = decode_token(&req.refresh, &settings.jwt_secret).map_err(|_| ApiError::Unauthorized)?;
+    let claims =
+        decode_token(&req.refresh, &settings.jwt_secret).map_err(|_| ApiError::Unauthorized)?;
 
     let mut conn = redis_conn.get_ref().clone();
     conn.set_ex::<_, _, ()>(

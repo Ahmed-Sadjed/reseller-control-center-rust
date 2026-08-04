@@ -17,9 +17,8 @@ pub async fn stats(
     // Global counts cached 600s (mirrors Django) + live credit_balance injected.
     let cached: Option<String> = conn.get(cache_key).await?;
     let mut data = match cached {
-        Some(body) => {
-            serde_json::from_str::<serde_json::Value>(&body).unwrap_or_else(|_| serde_json::json!({}))
-        }
+        Some(body) => serde_json::from_str::<serde_json::Value>(&body)
+            .unwrap_or_else(|_| serde_json::json!({})),
         None => {
             let (total_products, total_categories): (i64, i64) = sqlx::query_as(
                 "SELECT (SELECT count(*) FROM products WHERE is_active = true), \
@@ -44,7 +43,10 @@ pub async fn stats(
 
 /// Live balance is deliberately NOT cached: it must reflect the last
 /// transaction (purchases/refunds) within seconds.
-async fn live_balance(pool: &PgPool, user_id: uuid::Uuid) -> Result<rust_decimal::Decimal, ApiError> {
+async fn live_balance(
+    pool: &PgPool,
+    user_id: uuid::Uuid,
+) -> Result<rust_decimal::Decimal, ApiError> {
     Ok(sqlx::query_scalar::<_, rust_decimal::Decimal>(
         "SELECT credit_balance FROM users WHERE id = $1",
     )

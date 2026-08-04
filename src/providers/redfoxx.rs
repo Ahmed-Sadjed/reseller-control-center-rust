@@ -50,11 +50,22 @@ pub fn parse_catalog(body: &str) -> Result<Vec<CatalogProduct>, ProviderError> {
 
     let mut out = Vec::with_capacity(items.len());
     for item in items {
-        let id = item.get("id").and_then(|v| v.as_i64()).map(|i| i.to_string()).unwrap_or_default();
-        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let id = item
+            .get("id")
+            .and_then(|v| v.as_i64())
+            .map(|i| i.to_string())
+            .unwrap_or_default();
+        let name = item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let credits = item.get("credits").and_then(|v| v.as_i64()).unwrap_or(0);
         let duration = item.get("duration").and_then(|v| v.as_i64()).unwrap_or(1);
-        let unit = item.get("duration_unit").and_then(|v| v.as_str()).unwrap_or("month");
+        let unit = item
+            .get("duration_unit")
+            .and_then(|v| v.as_str())
+            .unwrap_or("month");
         out.push(CatalogProduct {
             external_pack_id: id,
             name,
@@ -68,19 +79,26 @@ pub fn parse_catalog(body: &str) -> Result<Vec<CatalogProduct>, ProviderError> {
 
 /// Parse a `POST /lines` response into a provisioned credential. The item
 /// carries `username`, `password` and `exp_date` (integer Unix epoch).
-pub fn parse_create_response(
-    body: &str,
-) -> Result<ProvisionedCredential, ProviderError> {
-    let raw: Value = serde_json::from_str(body)
-        .map_err(|e| ProviderError::Remote(format!("redfoxx: malformed create response ({e}): {body}")))?;
+pub fn parse_create_response(body: &str) -> Result<ProvisionedCredential, ProviderError> {
+    let raw: Value = serde_json::from_str(body).map_err(|e| {
+        ProviderError::Remote(format!("redfoxx: malformed create response ({e}): {body}"))
+    })?;
     let item = raw
         .as_object()
         .and_then(|o| o.get("data"))
         .cloned()
         .unwrap_or(raw.clone());
 
-    let username = item.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let password = item.get("password").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let username = item
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let password = item
+        .get("password")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     if username.is_empty() || password.is_empty() {
         return Err(ProviderError::Remote(
             "redfoxx: line created without username/password".to_string(),
@@ -90,9 +108,7 @@ pub fn parse_create_response(
     let expires_at = item
         .get("exp_date")
         .and_then(|v| v.as_i64())
-        .and_then(|secs| {
-            chrono::DateTime::from_timestamp(secs, 0)
-        });
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0));
 
     let mut extra = json!({
         "provider": "redfoxx",
@@ -135,7 +151,12 @@ impl RedfoxxAdapter {
         }
     }
 
-    async fn request_json(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value, ProviderError> {
+    async fn request_json(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value, ProviderError> {
         let url = format!("{}{}", self.api_url, path);
         let mut req = self
             .client
@@ -158,7 +179,10 @@ impl RedfoxxAdapter {
             .map_err(|e| ProviderError::Remote(format!("redfoxx: invalid JSON response: {e}")))?;
 
         if status.as_u16() == 422 {
-            let error_code = parsed.get("error_code").and_then(|v| v.as_str()).unwrap_or("");
+            let error_code = parsed
+                .get("error_code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if error_code == "insufficient_credits" {
                 return Err(ProviderError::Remote(
                     "Insufficient credits on provider side".to_string(),
@@ -174,7 +198,10 @@ impl RedfoxxAdapter {
             )));
         }
         if !status.is_success() {
-            let error_code = parsed.get("error_code").and_then(|v| v.as_str()).unwrap_or("");
+            let error_code = parsed
+                .get("error_code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             return Err(ProviderError::Remote(format!(
                 "Provider error (HTTP {}): {}",
                 status.as_u16(),
@@ -185,7 +212,12 @@ impl RedfoxxAdapter {
                 }
             )));
         }
-        if parsed.as_object().and_then(|o| o.get("success")).and_then(|v| v.as_bool()) == Some(false) {
+        if parsed
+            .as_object()
+            .and_then(|o| o.get("success"))
+            .and_then(|v| v.as_bool())
+            == Some(false)
+        {
             let msg = parsed
                 .get("error_code")
                 .and_then(|v| v.as_str())
@@ -227,17 +259,23 @@ impl ProviderAdapter for RedfoxxAdapter {
                 body["password"] = json!(p);
             }
         }
-        let data = self.request_json(reqwest::Method::POST, "/lines", Some(body)).await?;
-        parse_create_response(&serde_json::to_string(&data).map_err(|e| {
-            ProviderError::Request(format!("redfoxx: serialize: {e}"))
-        })?)
+        let data = self
+            .request_json(reqwest::Method::POST, "/lines", Some(body))
+            .await?;
+        parse_create_response(
+            &serde_json::to_string(&data)
+                .map_err(|e| ProviderError::Request(format!("redfoxx: serialize: {e}")))?,
+        )
     }
 
     async fn fetch_catalog(&self) -> Result<Vec<CatalogProduct>, ProviderError> {
-        let data = self.request_json(reqwest::Method::GET, "/packages", None).await?;
-        parse_catalog(&serde_json::to_string(&data).map_err(|e| {
-            ProviderError::Request(format!("redfoxx: serialize: {e}"))
-        })?)
+        let data = self
+            .request_json(reqwest::Method::GET, "/packages", None)
+            .await?;
+        parse_catalog(
+            &serde_json::to_string(&data)
+                .map_err(|e| ProviderError::Request(format!("redfoxx: serialize: {e}")))?,
+        )
     }
 }
 
@@ -274,7 +312,8 @@ mod tests {
 
     #[test]
     fn packages_accepted_as_bare_list() {
-        let body = r#"[{"id": 1, "name": "P", "credits": 3, "duration": 1, "duration_unit": "month"}]"#;
+        let body =
+            r#"[{"id": 1, "name": "P", "credits": 3, "duration": 1, "duration_unit": "month"}]"#;
         assert_eq!(parse_catalog(body).unwrap().len(), 1);
         assert!(parse_catalog(r#"{"error": "x"}"#).is_err());
     }

@@ -67,7 +67,10 @@ pub trait ProviderAdapter: Send + Sync {
 
     /// Provision a single line/credential. Never called while
     /// USE_MOCK_PROVIDER is true (factory safety switch).
-    async fn provision(&self, ctx: &ProvisionContext) -> Result<ProvisionedCredential, ProviderError>;
+    async fn provision(
+        &self,
+        ctx: &ProvisionContext,
+    ) -> Result<ProvisionedCredential, ProviderError>;
 
     async fn fetch_catalog(&self) -> Result<Vec<CatalogProduct>, ProviderError>;
 

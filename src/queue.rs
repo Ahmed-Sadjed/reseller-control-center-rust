@@ -40,8 +40,9 @@ async fn worker_once(
         .group(GROUP_NAME, &consumer)
         .count(1)
         .block(1000);
-    let reply: redis::streams::StreamReadReply =
-        conn.xread_options(&[&settings.redis_stream_key], &[">"], &opts).await?;
+    let reply: redis::streams::StreamReadReply = conn
+        .xread_options(&[&settings.redis_stream_key], &[">"], &opts)
+        .await?;
 
     let mut done = false;
     for stream in &reply.keys {
@@ -54,13 +55,16 @@ async fn worker_once(
             if let Some(order_id) = order_id {
                 match fulfill_order(pool, settings, order_id).await {
                     Ok(()) => tracing::info!(order_id = %order_id, "worker fulfilled order"),
-                    Err(e) => tracing::error!(order_id = %order_id, error = %e, "worker fulfillment failed"),
+                    Err(e) => {
+                        tracing::error!(order_id = %order_id, error = %e, "worker fulfillment failed")
+                    }
                 }
             }
 
             // Ack regardless: failures are persisted on the order itself.
-            let _: redis::RedisResult<usize> =
-                conn.xack(&settings.redis_stream_key, GROUP_NAME, &[&entry.id]).await;
+            let _: redis::RedisResult<usize> = conn
+                .xack(&settings.redis_stream_key, GROUP_NAME, &[&entry.id])
+                .await;
         }
     }
 

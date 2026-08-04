@@ -54,7 +54,10 @@ pub fn parse_exp_date(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         let clamped = d
             .and_hms_opt(23, 59, 59)
             .unwrap_or_else(|| d.and_hms_opt(0, 0, 0).expect("valid hms"));
-        return Some(chrono::DateTime::from_naive_utc_and_offset(clamped, chrono::Utc));
+        return Some(chrono::DateTime::from_naive_utc_and_offset(
+            clamped,
+            chrono::Utc,
+        ));
     }
     None
 }
@@ -78,9 +81,12 @@ pub fn parse_create_response(
     let expires_at = line
         .get("exp_date")
         .and_then(|v| v.as_str())
-        .map(parse_exp_date)
-        .flatten()
-        .or_else(|| data.get("exp_date").and_then(|v| v.as_str()).map(parse_exp_date).flatten());
+        .and_then(parse_exp_date)
+        .or_else(|| {
+            data.get("exp_date")
+                .and_then(|v| v.as_str())
+                .and_then(parse_exp_date)
+        });
 
     let username = line
         .get("username")
@@ -143,8 +149,9 @@ impl GoldenApiAdapter {
             .text()
             .await
             .map_err(|e| ProviderError::Request(format!("bad response from {url}: {e}")))?;
-        let parsed: Value = serde_json::from_str(&text)
-            .map_err(|e| ProviderError::Remote(format!("golden_api: invalid JSON response: {e}")))?;
+        let parsed: Value = serde_json::from_str(&text).map_err(|e| {
+            ProviderError::Remote(format!("golden_api: invalid JSON response: {e}"))
+        })?;
         if !status.is_success() {
             let err_msg = parsed
                 .get("message")
@@ -171,8 +178,9 @@ impl GoldenApiAdapter {
             .text()
             .await
             .map_err(|e| ProviderError::Request(format!("bad response from {url}: {e}")))?;
-        let parsed: Value = serde_json::from_str(&text)
-            .map_err(|e| ProviderError::Remote(format!("golden_api: invalid JSON response: {e}")))?;
+        let parsed: Value = serde_json::from_str(&text).map_err(|e| {
+            ProviderError::Remote(format!("golden_api: invalid JSON response: {e}"))
+        })?;
 
         if status.as_u16() == 422 {
             // Validation errors carry message + errors/details; Django retries
@@ -220,9 +228,7 @@ impl ProviderAdapter for GoldenApiAdapter {
         ctx: &ProvisionContext,
     ) -> Result<ProvisionedCredential, ProviderError> {
         let pack_id = ctx.external_pack_id.ok_or_else(|| {
-            ProviderError::Request(
-                "golden_api: product has no external_pack_id".to_string(),
-            )
+            ProviderError::Request("golden_api: product has no external_pack_id".to_string())
         })?;
 
         let mut username = format!("g{}", &Uuid::new_v4().simple().to_string()[..7]);
@@ -266,10 +272,7 @@ impl ProviderAdapter for GoldenApiAdapter {
         let mut last_err: Option<ProviderError> = None;
         for attempt in 0..3 {
             if attempt > 0 {
-                body["username"] = json!(format!(
-                    "g{}",
-                    &Uuid::new_v4().simple().to_string()[..7]
-                ));
+                body["username"] = json!(format!("g{}", &Uuid::new_v4().simple().to_string()[..7]));
             }
             match self.post_lines(body.clone()).await {
                 Ok(data) => {
@@ -331,18 +334,39 @@ mod tests {
 
     #[test]
     fn templates_missing_global_is_empty_list() {
-        assert_eq!(parse_templates(&json!({"data": {}})).unwrap().as_array().unwrap().len(), 0);
-        assert_eq!(parse_templates(&json!({"data": {"global": null}})).unwrap().as_array().unwrap().len(), 0);
+        assert_eq!(
+            parse_templates(&json!({"data": {}}))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            parse_templates(&json!({"data": {"global": null}}))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[test]
     fn domains_parsed_from_envelope() {
-        let body: Value = serde_json::from_str(r#"{"data": [{"id": 3, "domain": "ott.example.com"}]}"#)
-            .unwrap();
+        let body: Value =
+            serde_json::from_str(r#"{"data": [{"id": 3, "domain": "ott.example.com"}]}"#).unwrap();
         let d = parse_domains(&body).unwrap();
         assert_eq!(d.as_array().unwrap().len(), 1);
         assert_eq!(d[0]["domain"], "ott.example.com");
-        assert_eq!(parse_domains(&json!({"data": null})).unwrap().as_array().unwrap().len(), 0);
+        assert_eq!(
+            parse_domains(&json!({"data": null}))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[test]
@@ -379,19 +403,24 @@ mod tests {
         assert_eq!(cred.password, "SECRET77");
         assert!(cred.dns.is_none(), "golden_api lines have no dns/m3u url");
         assert!(cred.m3u_url.is_none());
-        assert_eq!(cred.expires_at.unwrap().to_rfc3339(), "2027-01-15T10:00:00+00:00");
+        assert_eq!(
+            cred.expires_at.unwrap().to_rfc3339(),
+            "2027-01-15T10:00:00+00:00"
+        );
         assert_eq!(cred.extra["line_id"], 1234);
         assert_eq!(cred.extra["package"], "Golden Pack");
         assert_eq!(cred.extra["template_name"], "Basic Template");
-        assert_eq!(cred.extra["dns_link_samsung"], "http://samsung.example.com/x");
+        assert_eq!(
+            cred.extra["dns_link_samsung"],
+            "http://samsung.example.com/x"
+        );
     }
 
     #[test]
     fn create_response_falls_back_to_sent_username() {
-        let body: Value = serde_json::from_str(
-            r#"{"data": [{"id": 1, "username": "", "exp_date": null}]}"#,
-        )
-        .unwrap();
+        let body: Value =
+            serde_json::from_str(r#"{"data": [{"id": 1, "username": "", "exp_date": null}]}"#)
+                .unwrap();
         let cred = parse_create_response(&body, "gsent123", "PASS123").unwrap();
         assert_eq!(cred.username, "gsent123");
         assert!(cred.expires_at.is_none());

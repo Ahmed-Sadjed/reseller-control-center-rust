@@ -9,10 +9,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::{
-    config::Settings,
-    error::ApiError,
-    middleware::AuthUser,
-    models::User,
+    config::Settings, error::ApiError, middleware::AuthUser, models::User,
     utils::crypto::hash_password,
 };
 
@@ -75,11 +72,12 @@ pub async fn resellers_list(
     require_admin(&user.0)?;
     let (page, page_size) = page_bounds(query.page, query.page_size);
 
-    let mut where_qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
-        "WHERE u.role = 'RESELLER'",
-    );
+    let mut where_qb: sqlx::QueryBuilder<sqlx::Postgres> =
+        sqlx::QueryBuilder::new("WHERE u.role = 'RESELLER'");
     if let Some(search) = &query.search {
-        where_qb.push(" AND u.username ILIKE ").push_bind(format!("%{search}%"));
+        where_qb
+            .push(" AND u.username ILIKE ")
+            .push_bind(format!("%{search}%"));
     }
     if let Some(status) = &query.status {
         if status == "active" {
@@ -140,15 +138,18 @@ async fn auto_email(pool: &PgPool, username: &str) -> Result<String, ApiError> {
         } else {
             format!("{username}{i}@reseller.local")
         };
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE email = $1)")
-            .bind(&candidate)
-            .fetch_one(pool)
-            .await?;
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE email = $1)")
+                .bind(&candidate)
+                .fetch_one(pool)
+                .await?;
         if !exists {
             return Ok(candidate);
         }
     }
-    Err(ApiError::Internal("could not allocate reseller email".into()))
+    Err(ApiError::Internal(
+        "could not allocate reseller email".into(),
+    ))
 }
 
 pub async fn resellers_create(
@@ -159,10 +160,14 @@ pub async fn resellers_create(
     require_admin(&user.0)?;
 
     if body.username.len() > 150 || body.username.is_empty() {
-        return Err(ApiError::bad_request("Username is required and must be at most 150 characters."));
+        return Err(ApiError::bad_request(
+            "Username is required and must be at most 150 characters.",
+        ));
     }
     if body.password.len() < 6 {
-        return Err(ApiError::bad_request("Password must be at least 6 characters."));
+        return Err(ApiError::bad_request(
+            "Password must be at least 6 characters.",
+        ));
     }
     if body.password != body.password_confirm {
         return Err(ApiError::bad_request("Passwords do not match."));
@@ -208,12 +213,10 @@ pub async fn resellers_create(
     }
     tx.commit().await?;
 
-    let row: ResellerListItem = sqlx::query_as(&format!(
-        "{RESELLER_LIST_SELECT} WHERE u.id = $1"
-    ))
-    .bind(id)
-    .fetch_one(pool.get_ref())
-    .await?;
+    let row: ResellerListItem = sqlx::query_as(&format!("{RESELLER_LIST_SELECT} WHERE u.id = $1"))
+        .bind(id)
+        .fetch_one(pool.get_ref())
+        .await?;
 
     Ok(HttpResponse::Created().json(row))
 }
@@ -279,7 +282,9 @@ pub async fn reseller_update(
 
     if let Some(username) = &body.username {
         if username.is_empty() || username.len() > 150 {
-            return Err(ApiError::bad_request("Username must be at most 150 characters."));
+            return Err(ApiError::bad_request(
+                "Username must be at most 150 characters.",
+            ));
         }
         let taken: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM users WHERE username = $1 AND id <> $2)",
@@ -301,7 +306,9 @@ pub async fn reseller_update(
     }
     if let Some(password) = &body.password {
         if password.len() < 6 {
-            return Err(ApiError::bad_request("Password must be at least 6 characters."));
+            return Err(ApiError::bad_request(
+                "Password must be at least 6 characters.",
+            ));
         }
         let hash = hash_password(password)
             .map_err(|e| ApiError::Internal(format!("hash password: {e}")))?;
@@ -424,12 +431,11 @@ pub async fn reseller_transactions(
     let id = path.into_inner();
     let (page, page_size) = page_bounds(query.page, query.page_size);
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM credit_transactions WHERE reseller_id = $1",
-    )
-    .bind(id)
-    .fetch_one(pool.get_ref())
-    .await?;
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM credit_transactions WHERE reseller_id = $1")
+            .bind(id)
+            .fetch_one(pool.get_ref())
+            .await?;
 
     let rows: Vec<CreditTransactionItem> = sqlx::query_as(
         "SELECT id, delta, balance_after, actor, reason, reference_order_id AS reference_order, created_at \
@@ -638,9 +644,8 @@ pub async fn admin_products_list(
     match query.kind.as_deref() {
         Some("manual") => static_where.push_str(" AND p.is_manual = true"),
         Some("whatsapp") => static_where.push_str(" AND pr.adapter_key = 'whatsapp'"),
-        Some("api") => static_where.push_str(
-            " AND p.is_manual = false AND COALESCE(pr.adapter_key, '') != 'whatsapp'",
-        ),
+        Some("api") => static_where
+            .push_str(" AND p.is_manual = false AND COALESCE(pr.adapter_key, '') != 'whatsapp'"),
         _ => {}
     }
     match query.status.as_deref() {
@@ -839,7 +844,10 @@ struct ProductPayload {
 }
 
 fn image_path_from_payload(body: &AdminProductCreateRequest) -> Option<String> {
-    body.image.as_ref().filter(|s| !s.trim().is_empty()).cloned()
+    body.image
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+        .cloned()
 }
 
 fn parse_opt_uuid(fields: &HashMap<String, String>, name: &str) -> Result<Option<Uuid>, ApiError> {
@@ -937,10 +945,7 @@ fn is_multipart(req: &HttpRequest) -> bool {
 }
 
 /// Reads a whole multipart field into memory, enforcing a byte limit.
-async fn read_field(
-    field: &mut actix_multipart::Field,
-    limit: usize,
-) -> Result<Vec<u8>, ApiError> {
+async fn read_field(field: &mut actix_multipart::Field, limit: usize) -> Result<Vec<u8>, ApiError> {
     let mut buf: Vec<u8> = Vec::new();
     while let Some(chunk) = field.next().await {
         let chunk =
@@ -973,8 +978,8 @@ async fn parse_multipart_form(
     let mut image: Option<(String, Vec<u8>)> = None;
 
     while let Some(item) = multipart.next().await {
-        let mut field = item
-            .map_err(|e| ApiError::BadRequest(format!("invalid multipart field: {e}")))?;
+        let mut field =
+            item.map_err(|e| ApiError::BadRequest(format!("invalid multipart field: {e}")))?;
         let name = field.name().unwrap_or("").to_string();
         if name == "image" {
             let data = read_field(&mut field, PRODUCT_IMAGE_LIMIT).await?;
@@ -1076,13 +1081,12 @@ pub async fn admin_products_delete(
 }
 
 async fn load_admin_product(pool: &PgPool, product_id: Uuid) -> Result<AdminProductItem, ApiError> {
-    let mut item: AdminProductItem = sqlx::query_as::<_, AdminProductItem>(&format!(
-        "{ADMIN_PRODUCT_SELECT} WHERE p.id = $1"
-    ))
-    .bind(product_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| ApiError::NotFound("product not found".into()))?;
+    let mut item: AdminProductItem =
+        sqlx::query_as::<_, AdminProductItem>(&format!("{ADMIN_PRODUCT_SELECT} WHERE p.id = $1"))
+            .bind(product_id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or_else(|| ApiError::NotFound("product not found".into()))?;
     item.image_url = media_url(item.image_url.take());
     Ok(item)
 }
@@ -1219,7 +1223,10 @@ pub async fn variant_update(
     if let Some(is_active) = body.is_active {
         qb.push(", is_active = ").push_bind(is_active);
     }
-    qb.push(" WHERE id = ").push_bind(variant_id).push(" AND product_id = ").push_bind(product_id);
+    qb.push(" WHERE id = ")
+        .push_bind(variant_id)
+        .push(" AND product_id = ")
+        .push_bind(product_id);
     let result = qb.build().execute(pool.get_ref()).await?;
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound("variant not found".into()));
@@ -1416,10 +1423,11 @@ pub async fn admin_category_delete(
 ) -> Result<HttpResponse, ApiError> {
     require_admin(&user.0)?;
     let category_id = path.into_inner();
-    let product_count: i64 = sqlx::query_scalar("SELECT count(*) FROM products WHERE category_id = $1")
-        .bind(category_id)
-        .fetch_one(pool.get_ref())
-        .await?;
+    let product_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM products WHERE category_id = $1")
+            .bind(category_id)
+            .fetch_one(pool.get_ref())
+            .await?;
     if product_count > 0 {
         return Err(ApiError::BadRequest(format!(
             "Cannot delete category. It has {product_count} product(s) assigned."
@@ -1499,15 +1507,15 @@ pub async fn manual_products_list(
     let mut where_qb: sqlx::QueryBuilder<sqlx::Postgres> =
         sqlx::QueryBuilder::new("WHERE p.is_manual = TRUE");
     if !search.is_empty() {
-        where_qb.push(" AND p.name ILIKE ").push_bind(format!("%{search}%"));
+        where_qb
+            .push(" AND p.name ILIKE ")
+            .push_bind(format!("%{search}%"));
     }
     let where_sql = where_qb.sql().to_string();
 
-    let count: i64 = sqlx::query_scalar(&format!(
-        "SELECT count(*) FROM products p {where_sql}"
-    ))
-    .fetch_one(pool.get_ref())
-    .await?;
+    let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM products p {where_sql}"))
+        .fetch_one(pool.get_ref())
+        .await?;
 
     let rows: Vec<ManualProductItem> = sqlx::query_as(&format!(
         "{MANUAL_PRODUCT_SELECT} {where_sql} ORDER BY p.name LIMIT $1 OFFSET $2"
@@ -1572,7 +1580,10 @@ fn credential_to_json(r: &sqlx::postgres::PgRow) -> serde_json::Value {
     let lifetime: bool = r.try_get("is_lifetime").unwrap_or(false);
     let variant_id: Option<Uuid> = r.try_get("variant_id").unwrap_or(None);
     let variant_display = if variant_id.is_some() {
-        Some(format!("{product_name} - {}", crate::models::duration_display(months, lifetime)))
+        Some(format!(
+            "{product_name} - {}",
+            crate::models::duration_display(months, lifetime)
+        ))
     } else {
         None
     };
@@ -1594,8 +1605,8 @@ fn credential_to_json(r: &sqlx::postgres::PgRow) -> serde_json::Value {
         "assigned_at": r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("assigned_at").unwrap_or(None),
         "used_at": r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("used_at").unwrap_or(None),
         "expires_at": r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("expires_at").unwrap_or(None),
-        "created_at": r.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at").unwrap_or_else(|_| chrono::DateTime::UNIX_EPOCH),
-        "updated_at": r.try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at").unwrap_or_else(|_| chrono::DateTime::UNIX_EPOCH),
+        "created_at": r.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at").unwrap_or(chrono::DateTime::UNIX_EPOCH),
+        "updated_at": r.try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at").unwrap_or(chrono::DateTime::UNIX_EPOCH),
     })
 }
 
@@ -1610,9 +1621,13 @@ fn push_cred_filter<'a>(
         qb.push(" AND mc.status = ").push_bind(status);
     }
     if !search.is_empty() {
-        qb.push(" AND (mc.username ILIKE ").push_bind(format!("%{search}%"));
-        qb.push(" OR mc.code ILIKE ").push_bind(format!("%{search}%"));
-        qb.push(" OR u.username ILIKE ").push_bind(format!("%{search}%")).push(")");
+        qb.push(" AND (mc.username ILIKE ")
+            .push_bind(format!("%{search}%"));
+        qb.push(" OR mc.code ILIKE ")
+            .push_bind(format!("%{search}%"));
+        qb.push(" OR u.username ILIKE ")
+            .push_bind(format!("%{search}%"))
+            .push(")");
     }
 }
 
@@ -1631,8 +1646,8 @@ pub async fn manual_product_detail(
     .bind(product_id)
     .fetch_optional(pool.get_ref())
     .await?;
-    let (pid, pname, ptype, pactive) = product
-        .ok_or_else(|| ApiError::NotFound("manual product not found".into()))?;
+    let (pid, pname, ptype, pactive) =
+        product.ok_or_else(|| ApiError::NotFound("manual product not found".into()))?;
 
     let (page, page_size) = page_bounds(query.page, query.page_size);
     let status = query.status.clone().unwrap_or_default();
@@ -1644,7 +1659,10 @@ pub async fn manual_product_detail(
     );
     count_qb.push_bind(pid);
     push_cred_filter(&mut count_qb, &status, &search);
-    let total: i64 = count_qb.build_query_scalar().fetch_one(pool.get_ref()).await?;
+    let total: i64 = count_qb
+        .build_query_scalar()
+        .fetch_one(pool.get_ref())
+        .await?;
 
     let available: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM manual_credentials WHERE product_id = $1 AND status = 'available'",
@@ -2175,7 +2193,7 @@ pub async fn dashboard_stats(
     .fetch_one(pool)
     .await?;
 
-    let revenue_str = format!("{:.2}", revenue.unwrap_or_else(|| Decimal::ZERO));
+    let revenue_str = format!("{:.2}", revenue.unwrap_or(Decimal::ZERO));
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "total_resellers": resellers.0,
@@ -2326,7 +2344,7 @@ pub async fn recent_activity(
         ));
     }
 
-    activities.sort_by(|a, b| b.0.cmp(&a.0));
+    activities.sort_by_key(|a| std::cmp::Reverse(a.0));
     let items: Vec<serde_json::Value> = activities
         .into_iter()
         .take(limit as usize)

@@ -13,7 +13,10 @@ use crate::{
 #[derive(Debug, Error)]
 pub enum ReservationError {
     #[error("insufficient credits. Required: {required}, Available: {available}")]
-    InsufficientCredits { required: Decimal, available: Decimal },
+    InsufficientCredits {
+        required: Decimal,
+        available: Decimal,
+    },
 
     #[error("product or variant not found")]
     ProductNotFound,
@@ -190,10 +193,12 @@ pub async fn fulfill_order(
 ) -> Result<(), FulfillmentError> {
     // Atomic claim: only the first caller wins a PENDING order; concurrent
     // fulfillment (background worker vs WhatsApp admin flow) is prevented.
-    let claimed = sqlx::query("UPDATE orders SET status = 'PROCESSING' WHERE uuid = $1 AND status = 'PENDING'")
-        .bind(order_id)
-        .execute(pool)
-        .await?;
+    let claimed = sqlx::query(
+        "UPDATE orders SET status = 'PROCESSING' WHERE uuid = $1 AND status = 'PENDING'",
+    )
+    .bind(order_id)
+    .execute(pool)
+    .await?;
     if claimed.rows_affected() == 0 {
         tracing::warn!(order_id = %order_id, "skipping fulfillment: order not pending (already claimed)");
         return Ok(());
@@ -239,16 +244,20 @@ pub async fn fulfill_order(
     .await?
     .ok_or(FulfillmentError::OrderNotFound(order_id))?;
 
-    let customer_username = sqlx::query_scalar::<_, String>("SELECT username FROM users WHERE id = $1")
-        .bind(order.reseller_id)
-        .fetch_optional(pool)
-        .await?
-        .unwrap_or_else(|| "reseller".to_string());
+    let customer_username =
+        sqlx::query_scalar::<_, String>("SELECT username FROM users WHERE id = $1")
+            .bind(order.reseller_id)
+            .fetch_optional(pool)
+            .await?
+            .unwrap_or_else(|| "reseller".to_string());
 
     let adapter = providers::get_provider(
         &adapter_key,
         endpoint.as_deref(),
-        api_token.as_deref().and_then(|t| String::from_utf8(t.to_vec()).ok()).as_deref(),
+        api_token
+            .as_deref()
+            .and_then(|t| String::from_utf8(t.to_vec()).ok())
+            .as_deref(),
         settings,
     )?;
 
@@ -292,7 +301,7 @@ pub async fn fulfill_order(
                 .bind(&result.dns)
                 .bind(&result.m3u_url)
                 .bind(&result.extra)
-                .bind(&result.expires_at)
+                .bind(result.expires_at)
                 .execute(pool)
                 .await?;
                 credentials_created += 1;
@@ -374,7 +383,12 @@ pub async fn fulfill_order(
         return Ok(());
     }
 
-    mark_failed(pool, &order, failure_reason.as_deref().unwrap_or("unknown error")).await?;
+    mark_failed(
+        pool,
+        &order,
+        failure_reason.as_deref().unwrap_or("unknown error"),
+    )
+    .await?;
     Ok(())
 }
 
