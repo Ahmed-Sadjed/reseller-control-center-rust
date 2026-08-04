@@ -46,6 +46,21 @@ pub fn decrypt(ciphertext: &[u8], key: &[u8]) -> Result<Vec<u8>, aes_gcm::Error>
     cipher.decrypt(nonce, payload)
 }
 
+/// Decrypt a provider `api_token` stored in BYTEA. New rows are `encrypt()`
+/// output; legacy rows hold plaintext UTF-8. Falls back to plaintext when the
+/// stored bytes are not valid encrypted output.
+pub fn decrypt_api_token(stored: &[u8], key: &[u8]) -> Option<String> {
+    if stored.is_empty() {
+        return None;
+    }
+    if let Ok(plain) = decrypt(stored, key) {
+        if let Ok(text) = String::from_utf8(plain) {
+            return Some(text);
+        }
+    }
+    String::from_utf8(stored.to_vec()).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +109,24 @@ mod tests {
     #[test]
     fn short_input_fails_cleanly() {
         assert!(decrypt(b"too-short", KEY).is_err());
+    }
+
+    #[test]
+    fn decrypt_api_token_roundtrip_and_fallback() {
+        let token = "some-reseller-token";
+        let encrypted = encrypt(token.as_bytes(), KEY).unwrap();
+        assert_eq!(decrypt_api_token(&encrypted, KEY).as_deref(), Some(token));
+        assert_eq!(
+            decrypt_api_token(token.as_bytes(), KEY).as_deref(),
+            Some(token),
+            "legacy plaintext rows still work"
+        );
+        assert_eq!(decrypt_api_token(b"", KEY), None);
+        let other: &[u8; 32] = b"fedcba9876543210fedcba9876543210";
+        assert_eq!(
+            decrypt_api_token(&encrypted, other),
+            None,
+            "encrypted bytes are not valid UTF-8, fallback must not return garbage"
+        );
     }
 }

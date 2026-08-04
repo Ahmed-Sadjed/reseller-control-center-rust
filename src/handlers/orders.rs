@@ -24,7 +24,7 @@ use crate::{
     config::Settings,
     error::ApiError,
     middleware::AuthUser,
-    models::{Credential, Order},
+    models::Order,
     services::{fulfill_order, reserve_order, PurchaseExtras, ReservationError},
 };
 
@@ -132,9 +132,9 @@ pub async fn create_order(
 
     // MAC validation via provider adapter when provided.
     if let Some(mac) = &body.mac {
-        let token = api_token
-            .as_deref()
-            .and_then(|t| String::from_utf8(t.to_vec()).ok());
+        let token = api_token.as_deref().and_then(|t| {
+            crate::utils::crypto::decrypt_api_token(t, settings.master_encryption_key.as_bytes())
+        });
         let provider = crate::providers::get_provider(
             &adapter_key,
             api_endpoint.as_deref(),
@@ -331,16 +331,33 @@ pub async fn order_credentials(
     Ok(HttpResponse::Ok().json(out))
 }
 
+type CredentialFullRow = (
+    Uuid,
+    Uuid,
+    String,
+    Option<String>,
+    Vec<u8>,
+    String,
+    String,
+    serde_json::Value,
+    Option<chrono::DateTime<chrono::Utc>>,
+    bool,
+    chrono::DateTime<chrono::Utc>,
+    Option<serde_json::Value>,
+);
+
 async fn load_order_credentials(
     pool: &PgPool,
     settings: &Settings,
     order_uuid: Uuid,
     reseller_id: Uuid,
 ) -> Result<Vec<crate::models::CredentialWithPassword>, ApiError> {
-    let rows = sqlx::query_as::<_, Credential>(
+    let rows: Vec<CredentialFullRow> = sqlx::query_as(
         "SELECT cr.id, cr.order_id, cr.external_username, cr.streaming_username, cr.encrypted_password, \
-         cr.dns_domain, cr.m3u_url, cr.data, cr.expires_at, cr.is_revoked, cr.created_at \
+         cr.dns_domain, cr.m3u_url, cr.data, cr.expires_at, cr.is_revoked, cr.created_at, p.provider_config \
          FROM credentials cr JOIN orders o ON o.id = cr.order_id \
+         LEFT JOIN products pr ON pr.id = o.product_id \
+         LEFT JOIN providers p ON p.id = pr.provider_id \
          WHERE o.uuid = $1 AND o.reseller_id = $2 AND cr.is_revoked = false",
     )
     .bind(order_uuid)
@@ -350,7 +367,40 @@ async fn load_order_credentials(
 
     Ok(rows
         .iter()
-        .map(|c| c.with_password(settings.master_encryption_key.as_bytes()))
+        .map(
+            |(
+                id,
+                order_id,
+                external_username,
+                streaming_username,
+                encrypted_password,
+                dns_domain,
+                m3u_url,
+                data,
+                expires_at,
+                is_revoked,
+                created_at,
+                provider_config,
+            )| {
+                crate::models::Credential {
+                    id: *id,
+                    order_id: *order_id,
+                    external_username: external_username.clone(),
+                    streaming_username: streaming_username.clone(),
+                    encrypted_password: encrypted_password.clone(),
+                    dns_domain: dns_domain.clone(),
+                    m3u_url: m3u_url.clone(),
+                    data: data.clone(),
+                    expires_at: *expires_at,
+                    is_revoked: *is_revoked,
+                    created_at: *created_at,
+                }
+                .with_password(
+                    settings.master_encryption_key.as_bytes(),
+                    provider_config.clone(),
+                )
+            },
+        )
         .collect())
 }
 
@@ -399,9 +449,9 @@ pub async fn check_device(
         })));
     };
 
-    let token = api_token
-        .as_deref()
-        .and_then(|t| String::from_utf8(t.to_vec()).ok());
+    let token = api_token.as_deref().and_then(|t| {
+        crate::utils::crypto::decrypt_api_token(t, settings.master_encryption_key.as_bytes())
+    });
     let adapter = crate::providers::get_provider(
         &adapter_key,
         endpoint.as_deref(),
@@ -509,7 +559,7 @@ pub async fn credentials_list(
     let rows: Vec<CredentialRow> =
         sqlx::query_as(
             "SELECT cr.id, cr.streaming_username, cr.m3u_url, cr.expires_at, cr.is_revoked, \
-                    p.adapter_key, pr.name, o.uuid, o.created_at, cr.data, p.extra_config, cr.created_at, pr.id \
+                    p.adapter_key, pr.name, o.uuid, o.created_at, cr.data, p.provider_config, cr.created_at, pr.id \
              FROM credentials cr \
              JOIN orders o ON o.id = cr.order_id \
              LEFT JOIN products pr ON pr.id = o.product_id \

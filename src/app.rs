@@ -277,12 +277,44 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 web::get().to(handlers::dashboard::admin_providers_list),
             )
             .route(
+                "/providers",
+                web::post().to(handlers::admin::admin_providers_create),
+            )
+            .route(
+                "/providers/",
+                web::post().to(handlers::admin::admin_providers_create),
+            )
+            .route(
                 "/providers/sync",
                 web::post().to(handlers::admin::sync_providers),
             )
             .route(
                 "/providers/sync/",
                 web::post().to(handlers::admin::sync_providers),
+            )
+            .route(
+                "/providers/{id}",
+                web::get().to(handlers::admin::admin_providers_get),
+            )
+            .route(
+                "/providers/{id}/",
+                web::get().to(handlers::admin::admin_providers_get),
+            )
+            .route(
+                "/providers/{id}",
+                web::put().to(handlers::admin::admin_providers_update),
+            )
+            .route(
+                "/providers/{id}/",
+                web::put().to(handlers::admin::admin_providers_update),
+            )
+            .route(
+                "/providers/{id}",
+                web::delete().to(handlers::admin::admin_providers_delete),
+            )
+            .route(
+                "/providers/{id}/",
+                web::delete().to(handlers::admin::admin_providers_delete),
             )
             .route(
                 "/manual-products",

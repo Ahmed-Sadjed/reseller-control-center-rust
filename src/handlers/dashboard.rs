@@ -1451,7 +1451,9 @@ pub struct AdminProviderItem {
     pub name: String,
     pub slug: String,
     pub adapter_key: String,
+    pub api_endpoint: String,
     pub is_active: bool,
+    pub has_token: bool,
 }
 
 pub async fn admin_providers_list(
@@ -1460,7 +1462,9 @@ pub async fn admin_providers_list(
 ) -> Result<HttpResponse, ApiError> {
     require_admin(&user.0)?;
     let rows: Vec<AdminProviderItem> = sqlx::query_as(
-        "SELECT id, name, slug, adapter_key, is_active FROM providers WHERE is_active = true ORDER BY name",
+        "SELECT id, name, slug, adapter_key, api_endpoint, is_active, \
+                (api_token IS NOT NULL AND octet_length(api_token) > 0) AS has_token \
+         FROM providers ORDER BY name",
     )
     .fetch_all(pool.get_ref())
     .await?;

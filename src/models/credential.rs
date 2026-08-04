@@ -37,11 +37,16 @@ pub struct CredentialWithPassword {
     pub expires_at: Option<DateTime<Utc>>,
     pub is_revoked: bool,
     pub created_at: DateTime<Utc>,
+    pub provider_config: Option<serde_json::Value>,
 }
 
 impl Credential {
     /// Decrypt and expose the streaming password for a completed order.
-    pub fn with_password(&self, master_key: &[u8]) -> CredentialWithPassword {
+    pub fn with_password(
+        &self,
+        master_key: &[u8],
+        provider_config: Option<serde_json::Value>,
+    ) -> CredentialWithPassword {
         let password = decrypt(&self.encrypted_password, master_key)
             .ok()
             .and_then(|bytes| String::from_utf8(bytes).ok())
@@ -62,6 +67,7 @@ impl Credential {
             expires_at: self.expires_at,
             is_revoked: self.is_revoked,
             created_at: self.created_at,
+            provider_config,
         }
     }
 }

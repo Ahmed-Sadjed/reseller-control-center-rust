@@ -247,7 +247,12 @@ async fn sync_one_provider(
         endpoint.as_deref(),
         api_token
             .as_deref()
-            .and_then(|t| String::from_utf8(t.to_vec()).ok())
+            .and_then(|t| {
+                crate::utils::crypto::decrypt_api_token(
+                    t,
+                    settings.master_encryption_key.as_bytes(),
+                )
+            })
             .as_deref(),
         settings,
     )?;
@@ -396,4 +401,301 @@ pub async fn whatsapp_order(
         "status": status,
         "message": "whatsapp order fulfilled",
     })))
+}
+
+// --- provider CRUD ----------------------------------------------------------
+
+type ProviderFullRow = (
+    Uuid,
+    String,
+    String,
+    String,
+    Option<String>,
+    serde_json::Value,
+    serde_json::Value,
+    bool,
+    bool,
+);
+
+const ALLOWED_FIELD_TYPES: &[&str] = &["text", "secret", "url", "number", "select"];
+
+fn validate_display_fields(extra_config: &serde_json::Value) -> Result<(), ApiError> {
+    let Some(fields) = extra_config
+        .get("display")
+        .and_then(|d| d.get("fields"))
+        .and_then(|f| f.as_array())
+    else {
+        return Ok(());
+    };
+    for field in fields {
+        let name = field.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let label = field.get("label").and_then(|v| v.as_str()).unwrap_or("");
+        let ftype = field.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if name.is_empty() || label.is_empty() || ftype.is_empty() {
+            return Err(ApiError::BadRequest(
+                "extra_config.display.fields: each field needs name, label and type.".into(),
+            ));
+        }
+        if !ALLOWED_FIELD_TYPES.contains(&ftype) {
+            return Err(ApiError::BadRequest(format!(
+                "extra_config.display.fields: unsupported type '{ftype}'. Allowed: {ALLOWED_FIELD_TYPES:?}."
+            )));
+        }
+        if ftype == "select"
+            && !field
+                .get("options")
+                .and_then(|o| o.as_array())
+                .is_some_and(|o| !o.is_empty())
+        {
+            return Err(ApiError::BadRequest(
+                "extra_config.display.fields: 'select' fields require a non-empty 'options' array."
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProviderWriteRequest {
+    pub name: String,
+    pub slug: String,
+    pub adapter_key: String,
+    pub api_endpoint: Option<String>,
+    pub extra_config: Option<serde_json::Value>,
+    pub provider_config: Option<serde_json::Value>,
+    pub is_active: Option<bool>,
+    pub api_token: Option<String>,
+}
+
+fn validate_provider_write(req: &ProviderWriteRequest) -> Result<(), ApiError> {
+    if req.name.trim().is_empty() {
+        return Err(ApiError::BadRequest("name is required.".into()));
+    }
+    let slug = req.slug.trim().to_lowercase();
+    if slug.is_empty() {
+        return Err(ApiError::BadRequest("slug is required.".into()));
+    }
+    if !slug
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(ApiError::BadRequest(
+            "slug may only contain lowercase letters, digits and hyphens.".into(),
+        ));
+    }
+    if req.adapter_key.trim().is_empty() {
+        return Err(ApiError::BadRequest("adapter_key is required.".into()));
+    }
+    if let Some(extra) = &req.extra_config {
+        if !extra.is_object() {
+            return Err(ApiError::BadRequest(
+                "extra_config must be a JSON object.".into(),
+            ));
+        }
+        validate_display_fields(extra)?;
+    }
+    if let Some(pc) = &req.provider_config {
+        if !pc.is_object() {
+            return Err(ApiError::BadRequest(
+                "provider_config must be a JSON object.".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn encrypt_token_or_none(
+    token: &Option<String>,
+    settings: &Settings,
+) -> Result<Option<Vec<u8>>, ApiError> {
+    match token {
+        None => Ok(None),
+        Some(t) if t.trim().is_empty() => Ok(None),
+        Some(t) => crate::utils::crypto::encrypt(
+            t.trim().as_bytes(),
+            settings.master_encryption_key.as_bytes(),
+        )
+        .map(Some)
+        .map_err(|_| ApiError::BadRequest("failed to encrypt api_token".into())),
+    }
+}
+
+pub async fn admin_providers_get(
+    pool: web::Data<PgPool>,
+    user: AuthUser,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    require_admin(&user.0)?;
+    let provider_id = path.into_inner();
+    let row: Option<ProviderFullRow> =
+        sqlx::query_as(
+            "SELECT id, name, slug, adapter_key, api_endpoint, extra_config, provider_config, is_active, \
+                    (api_token IS NOT NULL AND octet_length(api_token) > 0) \
+             FROM providers WHERE id = $1",
+        )
+        .bind(provider_id)
+        .fetch_optional(pool.get_ref())
+        .await?;
+    let Some((
+        id,
+        name,
+        slug,
+        adapter_key,
+        api_endpoint,
+        extra_config,
+        provider_config,
+        is_active,
+        has_token,
+    )) = row
+    else {
+        return Err(ApiError::NotFound("provider not found".into()));
+    };
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "id": id,
+        "name": name,
+        "slug": slug,
+        "adapter_key": adapter_key,
+        "api_endpoint": api_endpoint.unwrap_or_default(),
+        "extra_config": extra_config,
+        "provider_config": provider_config,
+        "is_active": is_active,
+        "has_token": has_token,
+    })))
+}
+
+pub async fn admin_providers_create(
+    pool: web::Data<PgPool>,
+    settings: web::Data<Settings>,
+    user: AuthUser,
+    body: web::Json<ProviderWriteRequest>,
+) -> Result<HttpResponse, ApiError> {
+    require_admin(&user.0)?;
+    validate_provider_write(&body)?;
+    let slug = body.slug.trim().to_lowercase();
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers WHERE slug = $1)")
+        .bind(&slug)
+        .fetch_one(pool.get_ref())
+        .await?;
+    if exists {
+        return Err(ApiError::BadRequest(format!(
+            "provider with slug '{slug}' already exists."
+        )));
+    }
+    let token = encrypt_token_or_none(&body.api_token, &settings)?;
+    let extra = body.extra_config.clone().unwrap_or(serde_json::json!({}));
+    let provider_config = body
+        .provider_config
+        .clone()
+        .unwrap_or(serde_json::json!({}));
+    let row: Option<(Uuid, String)> = sqlx::query_as(
+        "INSERT INTO providers (name, slug, adapter_key, api_endpoint, api_token, extra_config, provider_config, is_active) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+         ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name, updated_at = now() \
+         RETURNING id, name",
+    )
+    .bind(body.name.trim())
+    .bind(&slug)
+    .bind(body.adapter_key.trim())
+    .bind(body.api_endpoint.clone().unwrap_or_default().trim())
+    .bind(token)
+    .bind(extra)
+    .bind(provider_config)
+    .bind(body.is_active.unwrap_or(false))
+    .fetch_optional(pool.get_ref())
+    .await?;
+    let (id, name) =
+        row.ok_or_else(|| ApiError::BadRequest("provider could not be created".into()))?;
+    Ok(HttpResponse::Created().json(serde_json::json!({
+        "id": id,
+        "name": name,
+        "detail": "provider created",
+    })))
+}
+
+pub async fn admin_providers_update(
+    pool: web::Data<PgPool>,
+    settings: web::Data<Settings>,
+    user: AuthUser,
+    path: web::Path<Uuid>,
+    body: web::Json<ProviderWriteRequest>,
+) -> Result<HttpResponse, ApiError> {
+    require_admin(&user.0)?;
+    validate_provider_write(&body)?;
+    let provider_id = path.into_inner();
+    let slug = body.slug.trim().to_lowercase();
+    let slug_taken: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers WHERE slug = $1 AND id <> $2)")
+            .bind(&slug)
+            .bind(provider_id)
+            .fetch_one(pool.get_ref())
+            .await?;
+    if slug_taken {
+        return Err(ApiError::BadRequest(format!(
+            "provider with slug '{slug}' already exists."
+        )));
+    }
+    let token = encrypt_token_or_none(&body.api_token, &settings)?;
+    let existing: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM providers WHERE id = $1 AND api_token IS NOT NULL AND octet_length(api_token) > 0)",
+    )
+    .bind(provider_id)
+    .fetch_one(pool.get_ref())
+    .await?;
+    let result = sqlx::query(
+        "UPDATE providers SET name = $1, slug = $2, adapter_key = $3, api_endpoint = $4, \
+                extra_config = $5, provider_config = $6, is_active = $7, \
+                api_token = COALESCE($8, api_token), updated_at = now() \
+         WHERE id = $9",
+    )
+    .bind(body.name.trim())
+    .bind(&slug)
+    .bind(body.adapter_key.trim())
+    .bind(body.api_endpoint.clone().unwrap_or_default().trim())
+    .bind(body.extra_config.clone().unwrap_or(serde_json::json!({})))
+    .bind(
+        body.provider_config
+            .clone()
+            .unwrap_or(serde_json::json!({})),
+    )
+    .bind(body.is_active.unwrap_or(true))
+    .bind(token)
+    .bind(provider_id)
+    .execute(pool.get_ref())
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound("provider not found".into()));
+    }
+    let _ = existing;
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "id": provider_id,
+        "detail": "provider updated",
+    })))
+}
+
+pub async fn admin_providers_delete(
+    pool: web::Data<PgPool>,
+    user: AuthUser,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    require_admin(&user.0)?;
+    let provider_id = path.into_inner();
+    let product_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM products WHERE provider_id = $1")
+            .bind(provider_id)
+            .fetch_one(pool.get_ref())
+            .await?;
+    if product_count > 0 {
+        return Err(ApiError::BadRequest(format!(
+            "Cannot delete provider. It has {product_count} product(s) assigned."
+        )));
+    }
+    let result = sqlx::query("DELETE FROM providers WHERE id = $1")
+        .bind(provider_id)
+        .execute(pool.get_ref())
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound("provider not found".into()));
+    }
+    Ok(HttpResponse::NoContent().finish())
 }

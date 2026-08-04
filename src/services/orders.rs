@@ -7,7 +7,7 @@ use crate::{
     config::Settings,
     models::{Order, ProductVariant, User},
     providers,
-    utils::crypto::encrypt,
+    utils::crypto::{self, encrypt},
 };
 
 #[derive(Debug, Error)]
@@ -256,7 +256,7 @@ pub async fn fulfill_order(
         endpoint.as_deref(),
         api_token
             .as_deref()
-            .and_then(|t| String::from_utf8(t.to_vec()).ok())
+            .and_then(|t| crypto::decrypt_api_token(t, settings.master_encryption_key.as_bytes()))
             .as_deref(),
         settings,
     )?;
