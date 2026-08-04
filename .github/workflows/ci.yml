@@ -19,7 +19,7 @@ jobs:
     name: Lint (fmt + clippy)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -63,7 +63,7 @@ jobs:
       JWT_SECRET: ci_jwt_secret_0123456789abcdefghijklmnop
       MASTER_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
@@ -76,6 +76,6 @@ jobs:
     # Full release builds are slow; run on branch pushes and manual runs only.
     if: github.event_name != 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build image
         run: docker build -t reseller-control-center-rust:${{ github.sha }} .

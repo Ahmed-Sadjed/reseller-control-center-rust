@@ -134,6 +134,7 @@ async fn seed_catalog(pool: &PgPool) -> Uuid {
         None => sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO providers (name, slug, adapter_key, api_endpoint) \
                  VALUES ('Test Provider', 'test-provider', 'mock', 'https://panel.mock.invalid') \
+                 ON CONFLICT (name) DO UPDATE SET slug = EXCLUDED.slug \
                  RETURNING id",
         )
         .fetch_one(pool)
@@ -149,7 +150,9 @@ async fn seed_catalog(pool: &PgPool) -> Uuid {
         {
             Some(id) => id,
             None => sqlx::query_scalar::<_, Uuid>(
-                "INSERT INTO categories (name, slug) VALUES ('Test Cat', 'test-cat') RETURNING id",
+                "INSERT INTO categories (name, slug) VALUES ('Test Cat', 'test-cat') \
+                 ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name \
+                 RETURNING id",
             )
             .fetch_one(pool)
             .await
