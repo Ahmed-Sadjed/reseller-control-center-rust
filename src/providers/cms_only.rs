@@ -9,6 +9,7 @@
 
 use async_trait::async_trait;
 use reqwest::Url;
+use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use super::{
@@ -77,6 +78,77 @@ pub fn build_new_url(
         url.query_pairs_mut().append_pair("notes", n);
     }
     Ok(url)
+}
+
+/// action=bouquet URL: the panel's package list (read-only).
+pub fn build_catalog_url(api_endpoint: &str, api_key: &str) -> Result<Url, ProviderError> {
+    let mut url = Url::parse(api_endpoint).map_err(|e| {
+        ProviderError::Request(format!(
+            "invalid cms_only api_endpoint '{api_endpoint}': {e}"
+        ))
+    })?;
+    url.query_pairs_mut()
+        .append_pair("action", "bouquet")
+        .append_pair("api_key", api_key);
+    Ok(url)
+}
+
+fn catalog_price(message: &str) -> Decimal {
+    if let Some(idx) = message.rfind(" - ") {
+        let tail = &message[idx + 3..];
+        let tail = tail
+            .strip_suffix(" Credits")
+            .or_else(|| tail.strip_suffix(" Credit"));
+        if let Some(credits) = tail {
+            if let Ok(price) = credits.trim().parse::<Decimal>() {
+                return price;
+            }
+        }
+    }
+    Decimal::ZERO
+}
+
+/// Parse an `action=bouquet` response tolerantly: items may carry
+/// `id` (int or string) and the display text under `message`, `package`
+/// or `name`, optionally suffixed with ` - N Credits`.
+pub fn parse_catalog(body: &str) -> Result<Vec<CatalogProduct>, ProviderError> {
+    let items: Vec<serde_json::Value> = serde_json::from_str(body)
+        .map_err(|e| ProviderError::Remote(format!("neo4k: malformed catalog ({e}): {body}")))?;
+    let mut out = Vec::new();
+    for item in items {
+        let id = item.get("id").and_then(|v| {
+            v.as_str()
+                .map(String::from)
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+        });
+        let Some(id) = id else {
+            continue;
+        };
+        let message = item
+            .get("message")
+            .or_else(|| item.get("package"))
+            .or_else(|| item.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let mut name = message;
+        if let Some(idx) = message.rfind(" - ") {
+            let tail = &message[idx + 3..];
+            let tail = tail
+                .strip_suffix(" Credits")
+                .or_else(|| tail.strip_suffix(" Credit"));
+            if tail.is_some_and(|t| t.trim().parse::<Decimal>().is_ok()) {
+                name = &message[..idx];
+            }
+        }
+        out.push(CatalogProduct {
+            external_pack_id: id,
+            name: name.trim().to_string(),
+            duration_months: 1,
+            price: catalog_price(message),
+            category: None,
+        });
+    }
+    Ok(out)
 }
 
 /// Build the streaming m3u url: the panel's `url` when present, otherwise a
@@ -241,9 +313,9 @@ impl ProviderAdapter for CmsOnlyAdapter {
     }
 
     async fn fetch_catalog(&self) -> Result<Vec<CatalogProduct>, ProviderError> {
-        Err(ProviderError::Unsupported(
-            "neo4k: no catalog sync".to_string(),
-        ))
+        let url = build_catalog_url(&self.api_endpoint, &self.api_key)?;
+        let body = self.get_text(&url).await?;
+        parse_catalog(&body)
     }
 }
 
@@ -253,6 +325,32 @@ mod tests {
     use super::*;
 
     const ENDPOINT: &str = "https://panel.neo4k.example.com/api.php";
+
+    #[test]
+    fn catalog_parses_int_and_string_ids() {
+        let body = r#"[{"id":19,"message":"Gold - 1 Months - 2 Credits"},{"id":"20","package":"Silver"},{"id":21,"name":"Bronze - 1 Credit"}]"#;
+        let catalog = parse_catalog(body).unwrap();
+        assert_eq!(catalog.len(), 3);
+        assert_eq!(catalog[0].external_pack_id, "19");
+        assert_eq!(catalog[0].name, "Gold - 1 Months");
+        assert_eq!(catalog[0].price.to_string(), "2");
+        assert_eq!(catalog[1].external_pack_id, "20");
+        assert_eq!(catalog[1].name, "Silver");
+        assert_eq!(catalog[2].name, "Bronze");
+        assert_eq!(catalog[2].price.to_string(), "1");
+    }
+
+    #[test]
+    fn catalog_parses_real_bouquet_shape() {
+        let body =
+            r#"[{"id":"132","name":"SMALL - ARABIC"},{"id":"152","name":"Canada without adult"}]"#;
+        let catalog = parse_catalog(body).unwrap();
+        assert_eq!(catalog.len(), 2);
+        assert_eq!(catalog[0].external_pack_id, "132");
+        assert_eq!(catalog[0].name, "SMALL - ARABIC");
+        assert_eq!(catalog[0].price.to_string(), "0");
+        assert_eq!(catalog[1].name, "Canada without adult");
+    }
 
     #[test]
     fn new_url_contains_expected_params() {

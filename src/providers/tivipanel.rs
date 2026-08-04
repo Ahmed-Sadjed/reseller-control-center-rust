@@ -189,26 +189,66 @@ pub fn build_catalog_url(api_endpoint: &str, api_key: &str) -> Result<Url, Provi
 
 #[derive(Debug, Deserialize)]
 pub struct TiviPackage {
-    pub id: String,
+    pub id: i64,
     #[serde(default)]
-    pub package: String,
+    pub message: String,
 }
 
-/// Parse a `action=package` catalog response. The panel returns [{id, package}];
-/// the package name is for display only and durations/prices are unknown, so
-/// sync upserts them with a placeholder 1-month/0-price variant (admin edits).
+fn split_message(message: &str) -> (String, Decimal) {
+    if let Some(idx) = message.rfind(" - ") {
+        let tail = &message[idx + 3..];
+        let tail = tail
+            .strip_suffix(" Credits")
+            .or_else(|| tail.strip_suffix(" Credit"));
+        if let Some(credits) = tail {
+            if let Ok(price) = credits.trim().parse::<Decimal>() {
+                return (message[..idx].trim().to_string(), price);
+            }
+        }
+    }
+    (message.to_string(), Decimal::ZERO)
+}
+
+fn duration_from_name(name: &str) -> Option<i32> {
+    let lower = name.to_lowercase();
+    for unit in ["year", "month", "day"] {
+        if let Some(pos) = lower.find(unit) {
+            let prefix = &lower[..pos];
+            if let Some(end) = prefix.rfind(|c: char| c.is_ascii_digit()) {
+                let mut start = end;
+                while start > 0 && prefix.as_bytes()[start - 1].is_ascii_digit() {
+                    start -= 1;
+                }
+                let n: i32 = prefix[start..=end].parse().ok()?;
+                return match unit {
+                    "year" => Some(n * 12),
+                    "month" => Some(n),
+                    _ => Some(1),
+                };
+            }
+        }
+    }
+    None
+}
+
+/// Parse a `action=package` catalog response. The panel returns
+/// [{id, message: "Name - N Credits"}]; name, price and duration are
+/// extracted from the message text.
 pub fn parse_catalog(body: &str) -> Result<Vec<CatalogProduct>, ProviderError> {
     let packages: Vec<TiviPackage> = serde_json::from_str(body).map_err(|e| {
         ProviderError::Remote(format!("tivipanel: malformed catalog ({e}): {body}"))
     })?;
     Ok(packages
         .into_iter()
-        .map(|p| CatalogProduct {
-            external_pack_id: p.id,
-            name: p.package,
-            duration_months: 1,
-            price: Decimal::ZERO,
-            category: None,
+        .map(|p| {
+            let (name, price) = split_message(&p.message);
+            CatalogProduct {
+                external_pack_id: p.id.to_string(),
+                name,
+                duration_months: duration_from_name(&p.message).unwrap_or(1),
+                price,
+                category: None,
+            }
         })
         .collect())
 }
@@ -298,6 +338,22 @@ mod tests {
     use super::*;
 
     const ENDPOINT: &str = "https://api.tivipanel.net/reseller/panel_api.php";
+
+    #[test]
+    fn catalog_parses_real_panel_shape() {
+        let body = r#"[{"id":19,"message":"Official (1 Year) - 1 Credits"},{"id":20,"message":"Official (6 Months) - 0.5 Credits"},{"id":21,"message":"Official (3 Months) - 0.25 Credits"},{"id":34,"message":"Official (1 Months) - 0.10 Credits"},{"id":35,"message":"TIVI ONE - Trial (1 Days) - 0 Credits"}]"#;
+        let catalog = parse_catalog(body).unwrap();
+        assert_eq!(catalog.len(), 5);
+        assert_eq!(catalog[0].external_pack_id, "19");
+        assert_eq!(catalog[0].name, "Official (1 Year)");
+        assert_eq!(catalog[0].duration_months, 12);
+        assert_eq!(catalog[0].price, rust_decimal::Decimal::ONE);
+        assert_eq!(catalog[1].duration_months, 6);
+        assert_eq!(catalog[2].price.to_string(), "0.25");
+        assert_eq!(catalog[4].name, "TIVI ONE - Trial (1 Days)");
+        assert_eq!(catalog[4].price, rust_decimal::Decimal::ZERO);
+    }
+
     #[test]
     fn dns_derived_from_api_endpoint() {
         assert_eq!(
@@ -367,10 +423,14 @@ mod tests {
 
     #[test]
     fn catalog_parsed_to_products() {
-        let body = r#"[{"id":"5","package":"1 Month"},{"id":"7","package":"12 Months"}]"#;
+        let body = r#"[{"id":5,"message":"1 Month"},{"id":7,"message":"12 Months - 3 Credits"}]"#;
         let catalog = parse_catalog(body).unwrap();
         assert_eq!(catalog.len(), 2);
         assert_eq!(catalog[0].external_pack_id, "5");
         assert_eq!(catalog[0].name, "1 Month");
+        assert_eq!(catalog[0].duration_months, 1);
+        assert_eq!(catalog[1].name, "12 Months");
+        assert_eq!(catalog[1].duration_months, 12);
+        assert_eq!(catalog[1].price.to_string(), "3");
     }
 }
