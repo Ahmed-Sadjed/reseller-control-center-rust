@@ -201,6 +201,8 @@ pub async fn sync_providers(
         QueryBuilder::new("SELECT id, slug, adapter_key, api_endpoint, api_token FROM providers");
     if let Some(provider_id) = body.provider_id {
         qb.push(" WHERE id = ").push_bind(provider_id);
+    } else {
+        qb.push(" WHERE is_active = true");
     }
     qb.push(" ORDER BY name");
 
@@ -219,68 +221,87 @@ pub async fn sync_providers(
             .collect();
 
     let mut results = Vec::new();
-    for (provider_id, slug, adapter_key, endpoint, api_token) in providers_rows {
-        let adapter = providers::get_provider(
-            &adapter_key,
-            endpoint.as_deref(),
-            api_token
-                .as_deref()
-                .and_then(|t| String::from_utf8(t.to_vec()).ok())
-                .as_deref(),
-            &settings,
-        )?;
+    for row in providers_rows {
+        let slug = row.1.clone();
+        match sync_one_provider(pool.get_ref(), &mut category_map, &settings, row).await {
+            Ok(json) => results.push(json),
+            Err(err) => results.push(serde_json::json!({
+                "provider": slug,
+                "error": err.to_string(),
+            })),
+        }
+    }
 
-        let catalog = adapter.fetch_catalog().await?;
+    Ok(HttpResponse::Ok().json(results))
+}
 
-        for item in &catalog {
-            if let Some(category) = &item.category {
-                let key = category.to_lowercase();
-                if let std::collections::hash_map::Entry::Vacant(entry) = category_map.entry(key) {
-                    sqlx::query(
+async fn sync_one_provider(
+    pool: &PgPool,
+    category_map: &mut std::collections::HashMap<String, Uuid>,
+    settings: &Settings,
+    row: ProviderRow,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let (provider_id, slug, adapter_key, endpoint, api_token) = row;
+    let adapter = providers::get_provider(
+        &adapter_key,
+        endpoint.as_deref(),
+        api_token
+            .as_deref()
+            .and_then(|t| String::from_utf8(t.to_vec()).ok())
+            .as_deref(),
+        settings,
+    )?;
+
+    let catalog = adapter.fetch_catalog().await?;
+
+    for item in &catalog {
+        if let Some(category) = &item.category {
+            let key = category.to_lowercase();
+            if let std::collections::hash_map::Entry::Vacant(entry) = category_map.entry(key) {
+                sqlx::query(
                         "INSERT INTO categories (name, slug) VALUES ($1, $1) ON CONFLICT (slug) DO NOTHING",
                     )
                     .bind(category)
-                    .execute(pool.get_ref())
+                    .execute(pool)
                     .await?;
-                    let cat_id: Uuid =
-                        sqlx::query_scalar("SELECT id FROM categories WHERE lower(name) = $1")
-                            .bind(entry.key())
-                            .fetch_one(pool.get_ref())
-                            .await?;
-                    entry.insert(cat_id);
-                }
+                let cat_id: Uuid =
+                    sqlx::query_scalar("SELECT id FROM categories WHERE lower(name) = $1")
+                        .bind(entry.key())
+                        .fetch_one(pool)
+                        .await?;
+                entry.insert(cat_id);
             }
         }
+    }
 
-        if catalog.is_empty() {
-            results.push(serde_json::json!({
-                "provider": slug,
-                "products_upserted": 0,
-                "variants_upserted": 0,
-            }));
-            continue;
-        }
+    if catalog.is_empty() {
+        return Ok(serde_json::json!({
+            "provider": slug,
+            "products_upserted": 0,
+            "variants_upserted": 0,
+        }));
+    }
 
-        // Bulk upsert products, keyed on (provider_id, external_pack_id).
-        let mut product_qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
-            "INSERT INTO products (name, category_id, provider_id, external_pack_id, duration_months, \
+    // Bulk upsert products, keyed on (provider_id, external_pack_id).
+    let mut product_qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        "INSERT INTO products (name, category_id, provider_id, external_pack_id, duration_months, \
              price_in_credits, is_active, is_manual) ",
-        );
-        product_qb.push_values(&catalog, |mut b, item| {
-            let category_id = item
-                .category
-                .as_deref()
-                .and_then(|c| category_map.get(&c.to_lowercase()).copied());
-            b.push_bind(&item.name)
-                .push_bind(category_id)
-                .push_bind(provider_id)
-                .push_bind(item.external_pack_id.parse::<i32>().ok())
-                .push_bind(item.duration_months)
-                .push_bind(item.price)
-                .push_bind(true)
-                .push_bind(false);
-        });
-        product_qb.push(
+    );
+    product_qb.push_values(&catalog, |mut b, item| {
+        let category_id = item
+            .category
+            .as_deref()
+            .and_then(|c| category_map.get(&c.to_lowercase()).copied());
+        b.push_bind(&item.name)
+            .push_bind(category_id)
+            .push_bind(provider_id)
+            .push_bind(item.external_pack_id.parse::<i32>().ok())
+            .push_bind(item.duration_months)
+            .push_bind(item.price)
+            .push_bind(true)
+            .push_bind(false);
+    });
+    product_qb.push(
             " ON CONFLICT (provider_id, external_pack_id) WHERE external_pack_id IS NOT NULL DO UPDATE SET \
              name = EXCLUDED.name, category_id = EXCLUDED.category_id, \
              duration_months = EXCLUDED.duration_months, \
@@ -288,62 +309,56 @@ pub async fn sync_providers(
              RETURNING id, external_pack_id",
         );
 
-        let upserted: Vec<(Uuid, Option<i32>)> = product_qb
-            .build_query_as()
-            .fetch_all(pool.get_ref())
-            .await?;
-        let product_ids: std::collections::HashMap<i32, Uuid> = upserted
-            .iter()
-            .filter_map(|(id, pack)| pack.map(|p| (p, *id)))
-            .collect();
+    let upserted: Vec<(Uuid, Option<i32>)> = product_qb.build_query_as().fetch_all(pool).await?;
+    let product_ids: std::collections::HashMap<i32, Uuid> = upserted
+        .iter()
+        .filter_map(|(id, pack)| pack.map(|p| (p, *id)))
+        .collect();
 
-        // Bulk upsert variants, keyed on (product_id, external_pack_id, duration_months).
-        let variant_rows: Vec<(Uuid, i32, bool, i32, Decimal)> = catalog
-            .iter()
-            .filter_map(|item| {
-                let pack_id = item.external_pack_id.parse::<i32>().ok()?;
-                let product_id = product_ids.get(&pack_id).copied()?;
-                Some((
-                    product_id,
-                    item.duration_months,
-                    item.duration_months <= 0,
-                    pack_id,
-                    item.price,
-                ))
-            })
-            .collect();
+    // Bulk upsert variants, keyed on (product_id, external_pack_id, duration_months).
+    let variant_rows: Vec<(Uuid, i32, bool, i32, Decimal)> = catalog
+        .iter()
+        .filter_map(|item| {
+            let pack_id = item.external_pack_id.parse::<i32>().ok()?;
+            let product_id = product_ids.get(&pack_id).copied()?;
+            Some((
+                product_id,
+                item.duration_months,
+                item.duration_months <= 0,
+                pack_id,
+                item.price,
+            ))
+        })
+        .collect();
 
-        let mut variant_qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+    let mut variant_qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
             "INSERT INTO product_variants (product_id, duration_months, is_lifetime, external_pack_id, \
              price_in_credits) ",
         );
-        let variants_count = variant_rows.len();
-        if variants_count > 0 {
-            variant_qb.push_values(
-                variant_rows,
-                |mut b, (product_id, duration, is_lifetime, pack_id, price)| {
-                    b.push_bind(product_id)
-                        .push_bind(duration)
-                        .push_bind(is_lifetime)
-                        .push_bind(pack_id)
-                        .push_bind(price);
-                },
-            );
-            variant_qb.push(
-                " ON CONFLICT (product_id, external_pack_id, duration_months) DO UPDATE SET \
+    let variants_count = variant_rows.len();
+    if variants_count > 0 {
+        variant_qb.push_values(
+            variant_rows,
+            |mut b, (product_id, duration, is_lifetime, pack_id, price)| {
+                b.push_bind(product_id)
+                    .push_bind(duration)
+                    .push_bind(is_lifetime)
+                    .push_bind(pack_id)
+                    .push_bind(price);
+            },
+        );
+        variant_qb.push(
+            " ON CONFLICT (product_id, external_pack_id, duration_months) DO UPDATE SET \
                  price_in_credits = EXCLUDED.price_in_credits, updated_at = now()",
-            );
-            variant_qb.build().execute(pool.get_ref()).await?;
-        }
-
-        results.push(serde_json::json!({
-            "provider": slug,
-            "products_upserted": upserted.len(),
-            "variants_upserted": variants_count,
-        }));
+        );
+        variant_qb.build().execute(pool).await?;
     }
 
-    Ok(HttpResponse::Ok().json(results))
+    Ok(serde_json::json!({
+        "provider": slug,
+        "products_upserted": upserted.len(),
+        "variants_upserted": variants_count,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
