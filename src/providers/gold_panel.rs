@@ -17,7 +17,7 @@ use super::{
     error::ProviderError,
     promax::dns_from_m3u_url,
     types::{CatalogProduct, DeviceCheckResult, ProvisionContext, ProvisionedCredential},
-    ProviderAdapter,
+    ProviderAdapter, StatusValue, StringOrNum,
 };
 
 /// Default DNS domain and streaming port when the provider's extra_config
@@ -41,9 +41,9 @@ pub fn default_port(extra: &serde_json::Value) -> u16 {
 
 #[derive(Debug, Deserialize)]
 pub struct GoldPanelLine {
-    pub status: String,
+    pub status: StatusValue,
     #[serde(default)]
-    pub user_id: String,
+    pub user_id: StringOrNum,
     #[serde(default)]
     pub message: String,
     #[serde(default)]
@@ -68,14 +68,14 @@ pub fn build_new_url(
         .append_pair("action", "new")
         .append_pair("type", "m3u")
         .append_pair("sub", &sub.to_string())
-        .append_pair("pack", &pack.to_string())
-        .append_pair("api_key", api_key);
+        .append_pair("pack", &pack.to_string());
     if let Some(c) = country {
         url.query_pairs_mut().append_pair("country", c);
     }
     if let Some(n) = notes {
         url.query_pairs_mut().append_pair("notes", n);
     }
+    url.query_pairs_mut().append_pair("api_key", api_key);
     Ok(url)
 }
 
@@ -162,16 +162,10 @@ pub fn parse_new_response(
     let raw: serde_json::Value = serde_json::from_str(body).map_err(|e| {
         ProviderError::Remote(format!("goldpanel: malformed response ({e}): {body}"))
     })?;
-    let result = match raw {
-        serde_json::Value::Array(arr) => arr
-            .first()
-            .ok_or_else(|| ProviderError::Remote("goldpanel: empty response list".to_string()))?
-            .clone(),
-        other => other,
-    };
+    let result = super::unwrap_response_object(raw, "goldpanel")?;
     let line: GoldPanelLine = serde_json::from_value(result.clone())
         .map_err(|e| ProviderError::Remote(format!("goldpanel: malformed line ({e}): {result}")))?;
-    if line.status != "true" {
+    if !line.status.is_true() {
         return Err(ProviderError::Remote(format!(
             "Gold Panel error: {}",
             if line.message.is_empty() {
@@ -181,7 +175,7 @@ pub fn parse_new_response(
             }
         )));
     }
-    if line.user_id.is_empty() {
+    if line.user_id.as_string().is_empty() {
         return Err(ProviderError::Remote(
             "Missing 'user_id' in Gold Panel response".to_string(),
         ));
@@ -189,7 +183,7 @@ pub fn parse_new_response(
 
     // username/password live in the m3u url query string; fall back to
     // user_id, and password defaults to username (Django parity).
-    let mut username = line.user_id.clone();
+    let mut username = line.user_id.as_string();
     let mut password = String::new();
     if !line.url.is_empty() {
         let query: std::collections::HashMap<String, String> = Url::parse(&line.url)
@@ -201,7 +195,7 @@ pub fn parse_new_response(
             .get("username")
             .filter(|s| !s.is_empty())
             .cloned()
-            .unwrap_or(line.user_id.clone());
+            .unwrap_or_else(|| line.user_id.as_string());
         password = query.get("password").cloned().unwrap_or_default();
     }
     if password.is_empty() {
@@ -223,7 +217,7 @@ pub fn parse_new_response(
         expires_at,
         extra: serde_json::json!({
             "provider": "goldpanel",
-            "user_id": line.user_id,
+            "user_id": line.user_id.as_string(),
             "status": line.status,
             "message": line.message,
         }),
@@ -256,10 +250,9 @@ impl GoldPanelAdapter {
             .await
             .map_err(|e| ProviderError::Request(format!("{url}: {e}")))?;
         if !resp.status().is_success() {
-            return Err(ProviderError::Remote(format!(
-                "{url}: http {}",
-                resp.status()
-            )));
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::Remote(format!("{url}: http {status}: {body}")));
         }
         resp.text()
             .await
@@ -286,7 +279,7 @@ impl ProviderAdapter for GoldPanelAdapter {
         let pack_id = ctx.external_pack_id.ok_or_else(|| {
             ProviderError::Request("goldpanel: product has no external_pack_id".to_string())
         })?;
-        let sub = ctx.duration_months.unwrap_or(0);
+        let sub = super::duration_to_sub(ctx.duration_months);
         let url = build_new_url(
             &self.api_endpoint,
             &self.api_key,
@@ -349,11 +342,8 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(url.starts_with(ENDPOINT));
-        assert!(url.contains("action=new"));
-        assert!(url.contains("type=m3u"));
-        assert!(url.contains("sub=6"));
-        assert!(url.contains("pack=9"));
-        assert!(url.contains("api_key=KEY"));
+        // Documented order: action, type, sub, pack, optional country/notes, api_key last.
+        assert!(url.contains("action=new&type=m3u&sub=6&pack=9&notes=uuid-2&api_key=KEY"));
     }
 
     #[test]
@@ -376,6 +366,19 @@ mod tests {
             cred.m3u_url.as_deref(),
             Some("https://8k.cms-only.ru:8080/get.php?username=l1&password=l1")
         );
+    }
+
+    #[test]
+    fn boolean_status_accepted_in_dict_and_list() {
+        let dict = r#"{"status":true,"user_id":881000,"url":"https://stream.gp.example.com/get.php?username=b1&password=p1"}"#;
+        let cred = parse_new_response(dict, "8k.cms-only.ru", 8080, None).unwrap();
+        assert_eq!(cred.username, "b1");
+        assert_eq!(cred.password, "p1");
+        assert_eq!(cred.extra["user_id"], "881000");
+
+        let list = r#"[{"status":false,"message":"no credit"}]"#;
+        let err = parse_new_response(list, "dns", 1, None).unwrap_err();
+        assert!(err.to_string().contains("no credit"));
     }
 
     #[test]

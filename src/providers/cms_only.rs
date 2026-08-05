@@ -16,7 +16,7 @@ use super::{
     error::ProviderError,
     promax::dns_from_m3u_url,
     types::{CatalogProduct, DeviceCheckResult, ProvisionContext, ProvisionedCredential},
-    ProviderAdapter,
+    ProviderAdapter, StatusValue, StringOrNum,
 };
 
 /// Default DNS domain and streaming port when the provider's extra_config
@@ -40,9 +40,9 @@ pub fn default_port(extra: &serde_json::Value) -> u16 {
 
 #[derive(Debug, Deserialize)]
 pub struct CmsNewLine {
-    pub status: String,
+    pub status: StatusValue,
     #[serde(default)]
-    pub user_id: String,
+    pub user_id: StringOrNum,
     #[serde(default)]
     pub message: String,
     #[serde(default)]
@@ -69,14 +69,14 @@ pub fn build_new_url(
         .append_pair("action", "new")
         .append_pair("type", "m3u")
         .append_pair("sub", &sub.to_string())
-        .append_pair("pack", &pack.to_string())
-        .append_pair("api_key", api_key);
+        .append_pair("pack", &pack.to_string());
     if let Some(c) = country {
         url.query_pairs_mut().append_pair("country", c);
     }
     if let Some(n) = notes {
         url.query_pairs_mut().append_pair("notes", n);
     }
+    url.query_pairs_mut().append_pair("api_key", api_key);
     Ok(url)
 }
 
@@ -167,16 +167,21 @@ pub fn build_m3u_url(
 }
 
 /// Parse an `action=new` response into a provisioned credential.
-/// The caller fills `expires_at` (computed from the variant duration).
+/// The panel returns a bare object or a one-element list; `status` may be a
+/// string (`"success"`/`"error"`) or boolean. The caller fills `expires_at`
+/// (computed from the variant duration).
 pub fn parse_new_response(
     body: &str,
     dns_domain: &str,
     port: u16,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<ProvisionedCredential, ProviderError> {
-    let parsed: CmsNewLine = serde_json::from_str(body)
+    let raw: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| ProviderError::Remote(format!("neo4k: malformed response ({e}): {body}")))?;
-    if parsed.status == "error" {
+    let result = super::unwrap_response_object(raw, "neo4k")?;
+    let parsed: CmsNewLine = serde_json::from_value(result)
+        .map_err(|e| ProviderError::Remote(format!("neo4k: malformed line ({e}): {body}")))?;
+    if parsed.status.is_error() {
         let msg = if !parsed.message.is_empty() {
             parsed.message
         } else {
@@ -191,7 +196,7 @@ pub fn parse_new_response(
             }
         )));
     }
-    if parsed.user_id.is_empty() {
+    if parsed.user_id.as_string().is_empty() {
         return Err(ProviderError::Remote(
             "Missing 'user_id' in provider response".to_string(),
         ));
@@ -199,7 +204,7 @@ pub fn parse_new_response(
 
     // username/password live in the m3u url query string; fall back to
     // user_id, and password defaults to username (Django parity).
-    let mut username = parsed.user_id.clone();
+    let mut username = parsed.user_id.as_string();
     let mut password = String::new();
     if !parsed.url.is_empty() {
         let query: std::collections::HashMap<String, String> = Url::parse(&parsed.url)
@@ -211,7 +216,7 @@ pub fn parse_new_response(
             .get("username")
             .filter(|s| !s.is_empty())
             .cloned()
-            .unwrap_or(parsed.user_id.clone());
+            .unwrap_or_else(|| parsed.user_id.as_string());
         password = query.get("password").cloned().unwrap_or_default();
     }
     if password.is_empty() {
@@ -229,7 +234,7 @@ pub fn parse_new_response(
         expires_at,
         extra: serde_json::json!({
             "provider": "neo4k",
-            "user_id": parsed.user_id,
+            "user_id": parsed.user_id.as_string(),
             "status": parsed.status,
             "message": parsed.message,
             "result": parsed.result,
@@ -263,10 +268,9 @@ impl CmsOnlyAdapter {
             .await
             .map_err(|e| ProviderError::Request(format!("{url}: {e}")))?;
         if !resp.status().is_success() {
-            return Err(ProviderError::Remote(format!(
-                "{url}: http {}",
-                resp.status()
-            )));
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::Remote(format!("{url}: http {status}: {body}")));
         }
         resp.text()
             .await
@@ -293,7 +297,7 @@ impl ProviderAdapter for CmsOnlyAdapter {
         let pack_id = ctx.external_pack_id.ok_or_else(|| {
             ProviderError::Request("neo4k: product has no external_pack_id".to_string())
         })?;
-        let sub = ctx.duration_months.unwrap_or(0);
+        let sub = super::duration_to_sub(ctx.duration_months);
         let url = build_new_url(
             &self.api_endpoint,
             &self.api_key,
@@ -358,18 +362,15 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(url.starts_with(ENDPOINT));
-        assert!(url.contains("action=new"));
-        assert!(url.contains("type=m3u"));
-        assert!(url.contains("sub=3"));
-        assert!(url.contains("pack=42"));
-        assert!(url.contains("api_key=KEY"));
-        assert!(url.contains("notes=uuid-1"));
+        // Documented order: action, type, sub, pack, optional country/notes, api_key last.
+        assert!(url.contains("action=new&type=m3u&sub=3&pack=42&notes=uuid-1&api_key=KEY"));
 
         let lifetime = build_new_url(ENDPOINT, "K", 0, 1, Some("US"), None)
             .unwrap()
             .to_string();
         assert!(lifetime.contains("sub=0"));
         assert!(lifetime.contains("country=US"));
+        assert!(lifetime.contains("&api_key=K"));
         assert!(!lifetime.contains("notes="));
     }
 
@@ -408,6 +409,24 @@ mod tests {
         let err = parse_new_response(r#"{"status":"error","result":"quota"}"#, "dns", 1, None)
             .unwrap_err();
         assert!(err.to_string().contains("quota"));
+    }
+
+    #[test]
+    fn array_wrapped_response_with_boolean_status_parsed() {
+        let body = r#"[{"status":true,"user_id":777001,"url":"https://stream.example.com/get.php?username=u123&password=p456"}]"#;
+        let cred = parse_new_response(body, "kmapp.xyz", 8080, None).unwrap();
+        assert_eq!(cred.username, "u123");
+        assert_eq!(cred.password, "p456");
+        assert_eq!(cred.extra["user_id"], "777001");
+
+        let err = parse_new_response(
+            r#"[{"status":false,"message":"no credit"}]"#,
+            "dns",
+            1,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no credit"));
     }
 
     #[test]

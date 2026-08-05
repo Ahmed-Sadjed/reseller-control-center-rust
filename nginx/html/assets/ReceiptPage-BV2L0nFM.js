@@ -1,4 +1,4 @@
-import{r as p,j as e,a as U,e as D,c as $}from"./index-DNSyc2g6.js";import{L as v}from"./Layout-BlbzxkQJ.js";async function F(t){try{return await navigator.clipboard.writeText(t),!0}catch{return!1}}function R(t,i){const s=new Blob([t],{type:"text/plain"}),a=URL.createObjectURL(s),r=document.createElement("a");r.href=a,r.download=i,r.click(),URL.revokeObjectURL(a)}function P(t){return t.replace(/[:/\\]/g,"_")}function T(t,i,s,a){let r=`Username: ${t}
+import{r as p,j as e,a as U,e as D,c as $}from"./index-CXUXmjWz.js";import{L as v}from"./Layout-nIioGDQQ.js";async function F(t){try{return await navigator.clipboard.writeText(t),!0}catch{return!1}}function R(t,i){const s=new Blob([t],{type:"text/plain"}),a=URL.createObjectURL(s),r=document.createElement("a");r.href=a,r.download=i,r.click(),URL.revokeObjectURL(a)}function P(t){return t.replace(/[:/\\]/g,"_")}function T(t,i,s,a){let r=`Username: ${t}
 Password: ${i}
 DNS: ${s}`;return a&&(r+=`
 M3U URL: ${a}`),r}function B(t,i){return!t||!i?"":t.map(s=>{const a=i[s.key]??"";return`${s.label}: ${a}`}).join(`

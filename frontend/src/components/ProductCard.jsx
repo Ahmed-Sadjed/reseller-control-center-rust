@@ -54,6 +54,7 @@ export default function ProductCard({ product, onError }) {
   const [selectedDomainId, setSelectedDomainId] = useState('');
   const [bouquets, setBouquets] = useState([]);
   const [selectedBouquetId, setSelectedBouquetId] = useState('');
+  const [bouquetsError, setBouquetsError] = useState('');
 
   const handleCheckDevice = async () => {
     const trimmedMac = macInput.trim().toUpperCase();
@@ -91,18 +92,19 @@ export default function ProductCard({ product, onError }) {
       if (isGoldenApi) {
         setSelectedTemplateId('');
         setSelectedDomainId('');
-        api.get('/golden-templates/', { params: { provider_id: product.provider } })
+        api.get('/golden-templates/', { params: { provider_id: product.provider_id } })
           .then(res => setTemplates(res.data.templates || []))
           .catch(() => setTemplates([]));
-        api.get('/golden-domains/', { params: { provider_id: product.provider } })
+        api.get('/golden-domains/', { params: { provider_id: product.provider_id } })
           .then(res => setDomains(res.data.domains || []))
           .catch(() => setDomains([]));
       }
       if (isPromax) {
         setSelectedBouquetId('');
-        api.get('/promax-bouquets/', { params: { provider_id: product.provider } })
+        setBouquetsError('');
+        api.get('/promax-bouquets/', { params: { provider_id: product.provider_id } })
           .then(res => setBouquets(res.data.bouquets || []))
-          .catch(() => setBouquets([]));
+          .catch(() => setBouquetsError('Failed to load packages. Please try again.'));
       }
       return;
     }
@@ -478,6 +480,12 @@ export default function ProductCard({ product, onError }) {
                       <option key={b.id} value={b.id}>{b.name}</option>
                     ))}
                   </select>
+                </div>
+              )}
+
+              {isPromax && bouquetsError && !bouquets.length && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded text-sm text-red-700">
+                  {bouquetsError}
                 </div>
               )}
 

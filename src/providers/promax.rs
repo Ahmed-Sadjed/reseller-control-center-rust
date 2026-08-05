@@ -18,14 +18,14 @@ use serde::Deserialize;
 use super::{
     error::ProviderError,
     types::{CatalogProduct, DeviceCheckResult, ProvisionContext, ProvisionedCredential},
-    ProviderAdapter,
+    ProviderAdapter, StatusValue, StringOrNum,
 };
 
 #[derive(Debug, Deserialize)]
 pub struct PromaxNewLine {
-    pub status: String,
+    pub status: StatusValue,
     #[serde(default)]
-    pub user_id: String,
+    pub user_id: StringOrNum,
     #[serde(default)]
     pub notes: String,
     #[serde(default)]
@@ -50,14 +50,18 @@ pub fn dns_from_m3u_url(m3u_url: &str) -> Result<String, ProviderError> {
 }
 
 /// Parse a `action=new` response into a provisioned credential. The m3u url
-/// comes straight from the panel; dns is derived from it.
+/// comes straight from the panel; dns is derived from it. The panel returns a
+/// bare object or a one-element list and `status` as a string or boolean.
 pub fn parse_new_response(
     body: &str,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<ProvisionedCredential, ProviderError> {
-    let parsed: PromaxNewLine = serde_json::from_str(body)
+    let raw: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| ProviderError::Remote(format!("promax: malformed response ({e}): {body}")))?;
-    if parsed.status != "true" {
+    let result = super::unwrap_response_object(raw, "promax")?;
+    let parsed: PromaxNewLine = serde_json::from_value(result)
+        .map_err(|e| ProviderError::Remote(format!("promax: malformed line ({e}): {body}")))?;
+    if !parsed.status.is_true() {
         return Err(ProviderError::Remote(format!(
             "promax: {}",
             if parsed.message.is_empty() {
@@ -94,7 +98,7 @@ pub fn parse_new_response(
         expires_at,
         extra: serde_json::json!({
             "provider": "promax",
-            "user_id": parsed.user_id,
+            "user_id": parsed.user_id.as_string(),
             "country": parsed.country,
             "notes": parsed.notes,
             "message": parsed.message,
@@ -122,11 +126,11 @@ pub fn build_new_url(
         .append_pair("sub", &sub.to_string())
         .append_pair("pack", pack)
         .append_pair("notes", notes)
-        .append_pair("adult", "0")
-        .append_pair("api_key", api_key);
+        .append_pair("adult", "0");
     if let Some(c) = country {
         url.query_pairs_mut().append_pair("country", c);
     }
+    url.query_pairs_mut().append_pair("api_key", api_key);
     Ok(url)
 }
 
@@ -231,10 +235,9 @@ impl PromaxAdapter {
             .await
             .map_err(|e| ProviderError::Request(format!("{url}: {e}")))?;
         if !resp.status().is_success() {
-            return Err(ProviderError::Remote(format!(
-                "{url}: http {}",
-                resp.status()
-            )));
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::Remote(format!("{url}: http {status}: {body}")));
         }
         resp.text()
             .await
@@ -270,7 +273,7 @@ impl ProviderAdapter for PromaxAdapter {
                         .to_string(),
                 )
             })?;
-        let sub = ctx.duration_months.unwrap_or(0);
+        let sub = super::duration_to_sub(ctx.duration_months);
         let url = build_new_url(
             &self.api_endpoint,
             &self.api_key,
@@ -339,14 +342,8 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(url.starts_with(ENDPOINT));
-        assert!(url.contains("action=new"));
-        assert!(url.contains("type=m3u"));
-        assert!(url.contains("sub=6"));
-        assert!(url.contains("pack=42"));
-        assert!(url.contains("notes=uuid-9"));
-        assert!(url.contains("adult=0"));
-        assert!(url.contains("country=FR"));
-        assert!(url.contains("api_key=KEY"));
+        // Documented order: action, type, sub, pack, notes, adult, country, api_key.
+        assert!(url.contains("action=new&type=m3u&sub=6&pack=42&notes=uuid-9&adult=0&country=FR&api_key=KEY"));
     }
 
     #[test]
@@ -369,6 +366,22 @@ mod tests {
         let err = parse_new_response(r#"{"status":"false","message":"wrong api key"}"#, None)
             .unwrap_err();
         assert!(err.to_string().contains("wrong api key"));
+    }
+
+    #[test]
+    fn array_wrapped_response_with_boolean_status_parsed() {
+        let body = r#"[{"status":true,"user_id":12178130,"notes":"n1","message":"Add M3U successful","url":"http://reseller-domain.com/get.php?username=u1&password=p1&type=m3u_plus"}]"#;
+        let cred = parse_new_response(body, None).unwrap();
+        assert_eq!(cred.username, "u1");
+        assert_eq!(cred.password, "p1");
+        assert_eq!(cred.extra["user_id"], "12178130");
+        assert!(parse_new_response(
+            r#"[{"status":false,"message":"no credit"}]"#,
+            None
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("no credit"));
     }
 
     #[test]

@@ -19,12 +19,12 @@ use serde::Deserialize;
 use super::{
     error::ProviderError,
     types::{CatalogProduct, DeviceCheckResult, ProvisionContext, ProvisionedCredential},
-    ProviderAdapter,
+    ProviderAdapter, StatusValue, StringOrNum,
 };
 
 #[derive(Debug, Deserialize)]
 pub struct TiviNewLine {
-    pub status: String,
+    pub status: StatusValue,
     #[serde(default)]
     pub username: String,
     #[serde(default)]
@@ -32,9 +32,9 @@ pub struct TiviNewLine {
     #[serde(default)]
     pub country: String,
     #[serde(default)]
-    pub credits: String,
+    pub credits: Option<StringOrNum>,
     #[serde(default)]
-    pub cost: String,
+    pub cost: Option<StringOrNum>,
     #[serde(default)]
     pub notes: String,
     #[serde(default)]
@@ -60,17 +60,22 @@ pub fn build_m3u_url(dns: &str, username: &str, password: &str) -> String {
     format!("{dns}/get.php?username={username}&password={password}")
 }
 
-/// Parse a `action=new` response into a provisioned credential. The caller
-/// fills `expires_at` (computed from the variant duration when absent).
+/// Parse a `action=new` response into a provisioned credential. The panel
+/// returns a bare object or a one-element list; `status` may be a string or
+/// boolean and `credits`/`cost` strings or numbers. The caller fills
+/// `expires_at` (computed from the variant duration when absent).
 pub fn parse_new_response(
     body: &str,
     dns: &str,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<ProvisionedCredential, ProviderError> {
-    let parsed: TiviNewLine = serde_json::from_str(body).map_err(|e| {
+    let raw: serde_json::Value = serde_json::from_str(body).map_err(|e| {
         ProviderError::Remote(format!("tivipanel: malformed response ({e}): {body}"))
     })?;
-    if parsed.status != "true" {
+    let result = super::unwrap_response_object(raw, "tivipanel")?;
+    let parsed: TiviNewLine = serde_json::from_value(result)
+        .map_err(|e| ProviderError::Remote(format!("tivipanel: malformed line ({e}): {body}")))?;
+    if !parsed.status.is_true() {
         return Err(ProviderError::Remote(format!(
             "tivipanel: {}",
             if parsed.message.is_empty() {
@@ -95,15 +100,15 @@ pub fn parse_new_response(
         extra: serde_json::json!({
             "provider": "tivipanel",
             "country": parsed.country,
-            "credits": parsed.credits,
-            "cost": parsed.cost,
+            "credits": parsed.credits.as_ref().map(StringOrNum::as_string).unwrap_or_default(),
+            "cost": parsed.cost.as_ref().map(StringOrNum::as_string).unwrap_or_default(),
             "notes": parsed.notes,
             "message": parsed.message,
         }),
     })
 }
 
-/// action=new URL. `package` is the variant duration in months (0 = lifetime).
+/// action=new URL. `package` is the variant duration in months (0 = trial/lifetime).
 pub fn build_new_url(
     api_endpoint: &str,
     api_key: &str,
@@ -118,17 +123,17 @@ pub fn build_new_url(
         ))
     })?;
     url.query_pairs_mut()
+        .append_pair("notes", notes)
         .append_pair("action", "new")
-        .append_pair("type", "m3u")
-        .append_pair("package", &package.to_string())
-        .append_pair("api_key", api_key);
+        .append_pair("type", "m3u");
     if let Some(t) = template {
         url.query_pairs_mut().append_pair("template", t);
     }
-    url.query_pairs_mut().append_pair("notes", notes);
+    url.query_pairs_mut().append_pair("package", &package.to_string());
     if let Some(c) = country {
         url.query_pairs_mut().append_pair("country", c);
     }
+    url.query_pairs_mut().append_pair("api_key", api_key);
     Ok(url)
 }
 
@@ -278,10 +283,14 @@ impl TiviPanelAdapter {
             .send()
             .await
             .map_err(|e| ProviderError::Request(format!("{url}: {e}")))?;
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if !status.is_success() {
+            // The panel's 400 body carries the real reason (missing/unknown
+            // package, template, api_key, ...); surface it instead of a bare
+            // status code so failures are diagnosable.
+            let body = resp.text().await.unwrap_or_default();
             return Err(ProviderError::Remote(format!(
-                "{url}: http {}",
-                resp.status()
+                "{url}: http {status}: {body}"
             )));
         }
         resp.text()
@@ -306,14 +315,17 @@ impl ProviderAdapter for TiviPanelAdapter {
         &self,
         ctx: &ProvisionContext,
     ) -> Result<ProvisionedCredential, ProviderError> {
-        let package = ctx.duration_months.unwrap_or(0);
+        let package = super::duration_to_sub(ctx.duration_months);
         let url = build_new_url(
             &self.api_endpoint,
             &self.api_key,
             package,
             ctx.template_id.as_deref(),
             &ctx.order_id.to_string(),
-            None,
+            // The panel rejects the request when `country` is absent (the docs
+            // mark it optional but the panel requires it); "ALL" is the
+            // documented value meaning no geo-lock/VPN.
+            Some("ALL"),
         )?;
         let body = self.get_text(&url).await?;
         let dns = base_dns_from_api_url(&self.api_endpoint)?;
@@ -368,11 +380,27 @@ mod tests {
     }
 
     #[test]
+    fn hour_codes_map_to_trial_package() {
+        assert_eq!(super::super::duration_to_sub(Some(102)), 0);
+        assert_eq!(super::super::duration_to_sub(Some(100)), 0);
+        assert_eq!(super::super::duration_to_sub(Some(103)), 0);
+        assert_eq!(super::super::duration_to_sub(None), 0);
+        assert_eq!(super::super::duration_to_sub(Some(0)), 0);
+        assert_eq!(super::super::duration_to_sub(Some(1)), 1);
+        assert_eq!(super::super::duration_to_sub(Some(3)), 3);
+        assert_eq!(super::super::duration_to_sub(Some(6)), 6);
+        assert_eq!(super::super::duration_to_sub(Some(12)), 12);
+    }
+
+    #[test]
     fn new_url_contains_expected_params() {
         let url = build_new_url(ENDPOINT, "KEY123", 3, Some("tpl42"), "uuid-1", Some("US"))
             .unwrap()
             .to_string();
         assert!(url.starts_with(ENDPOINT));
+        // Parameter order must match the panel's documented example:
+        // notes, action, type, template, package, country, api_key.
+        assert!(url.contains("panel_api.php?notes=uuid-1&action=new&type=m3u&template=tpl42&package=3&country=US&api_key=KEY123"));
         assert!(url.contains("action=new"));
         assert!(url.contains("type=m3u"));
         assert!(url.contains("package=3"));
@@ -384,9 +412,20 @@ mod tests {
         let lifetime = build_new_url(ENDPOINT, "K", 0, None, "n", None)
             .unwrap()
             .to_string();
-        assert!(lifetime.contains("package=0"));
+        assert!(lifetime.contains("panel_api.php?notes=n&action=new&type=m3u&package=0&api_key=K"));
         assert!(!lifetime.contains("template"));
         assert!(!lifetime.contains("country"));
+    }
+
+    #[test]
+    fn array_wrapped_response_with_typed_fields_parsed() {
+        let body = r#"[{"status":true,"username":"23M2ZX","password":"2T3B9A","country":"[\"ALL\"]","credits":6.9,"cost":0,"message":"M3U Added Successfully !"}]"#;
+        let cred = parse_new_response(body, "https://api.tivipanel.net", None).unwrap();
+        assert_eq!(cred.username, "23M2ZX");
+        assert_eq!(cred.password, "2T3B9A");
+        assert_eq!(cred.dns.as_deref(), Some("https://api.tivipanel.net"));
+        assert_eq!(cred.extra["credits"], "6.9");
+        assert_eq!(cred.extra["cost"], "0");
     }
 
     #[test]
