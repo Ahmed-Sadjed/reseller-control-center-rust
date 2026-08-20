@@ -1,7 +1,7 @@
 use actix_cors::Cors;
 use actix_web::{
-    dev::{ServiceFactory, ServiceRequest, ServiceResponse},
-    http::header,
+    dev::{RequestHead, ServiceFactory, ServiceRequest, ServiceResponse},
+    http::{header, header::HeaderValue},
     web, App, Error, HttpResponse,
 };
 use sqlx::PgPool;
@@ -485,17 +485,20 @@ pub fn build_app(
         InitError = (),
     >,
 > {
+    let cors_origins = settings.cors_origins.clone();
     App::new()
         .app_data(web::Data::new(settings))
         .app_data(web::Data::new(pool))
         .app_data(web::Data::new(redis_conn))
-        // CORS mirrors Django: localhost dev origins with credentials, plus
+        // CORS mirrors Django: dev origins by default, override with the
+        // CORS_ORIGINS env var (comma-separated) for hosted frontends, plus
         // the Idempotency-Key header the storefront sends on purchases.
         // NOTE: HeaderName::from_static panics on uppercase — use lowercase.
         .wrap(
             Cors::default()
-                .allowed_origin("http://localhost:5173")
-                .allowed_origin("http://localhost:80")
+                .allowed_origin_fn(move |origin: &HeaderValue, _req: &RequestHead| {
+                    cors_origins.iter().any(|o| o.as_bytes() == origin.as_bytes())
+                })
                 .allowed_methods(["GET", "POST", "PUT", "DELETE", "OPTIONS"])
                 .allowed_headers([
                     header::AUTHORIZATION,

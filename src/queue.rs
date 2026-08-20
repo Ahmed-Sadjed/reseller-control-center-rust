@@ -39,7 +39,9 @@ async fn worker_once(
     let opts = redis::streams::StreamReadOptions::default()
         .group(GROUP_NAME, &consumer)
         .count(1)
-        .block(1000);
+        // 30s block keeps idle command volume under Upstash's free-tier quota
+        // (~78k/day at 1s vs ~2.9k/day at 30s).
+        .block(30_000);
     let reply: redis::streams::StreamReadReply = conn
         .xread_options(&[&settings.redis_stream_key], &[">"], &opts)
         .await?;

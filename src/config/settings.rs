@@ -17,6 +17,7 @@ pub struct Settings {
     pub rust_log: String,
     pub redis_stream_key: String,
     pub media_dir: String,
+    pub cors_origins: Vec<String>,
 }
 
 impl Settings {
@@ -70,6 +71,23 @@ impl Settings {
             redis_stream_key: env::var("REDIS_STREAM_KEY")
                 .unwrap_or_else(|_| "orders:fulfill".to_string()),
             media_dir: env::var("MEDIA_DIR").unwrap_or_else(|_| "media".to_string()),
+            // Comma-separated allowed browser origins (e.g. the Vercel URL).
+            // Defaults keep the dev experience unchanged.
+            cors_origins: env::var("CORS_ORIGINS")
+                .ok()
+                .map(|v| {
+                    v.split(',')
+                        .map(|o| o.trim().to_string())
+                        .filter(|o| !o.is_empty())
+                        .collect()
+                })
+                .filter(|origins: &Vec<String>| !origins.is_empty())
+                .unwrap_or_else(|| {
+                    vec![
+                        "http://localhost:5173".to_string(),
+                        "http://localhost:80".to_string(),
+                    ]
+                }),
         }
     }
 }
